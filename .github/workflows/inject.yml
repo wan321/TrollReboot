@@ -50,15 +50,20 @@ jobs:
       - name: Build BatteryGuard.dylib
         run: |
           set -euo pipefail
-          cd BatteryGuard
-          make clean || true
-          set -o pipefail
-          make 2>&1 | tee build-dylib.log
-          DYLIB=$(find .theos -name 'BatteryGuard.dylib' -type f | head -1)
-          test -n "$DYLIB"
-          cp "$DYLIB" "$GITHUB_WORKSPACE/BatteryGuard.dylib"
-          ls -la "$GITHUB_WORKSPACE/BatteryGuard.dylib"
-          file "$GITHUB_WORKSPACE/BatteryGuard.dylib"
+          SDK=$(xcrun --sdk iphoneos --show-sdk-path)
+          echo "SDK=$SDK"
+          xcodebuild -version
+          mkdir -p dist
+          clang -arch arm64 -miphoneos-version-min=14.0 -isysroot "$SDK" \
+            -dynamiclib -fobjc-arc -O2 -Wno-unused-but-set-variable \
+            -framework UIKit -framework Foundation -framework IOKit \
+            -Wl,-install_name,@executable_path/BatteryGuard.dylib \
+            -I. -o dist/BatteryGuard.dylib \
+            BatteryGuard/BGMain.m TRBattery.m TRMonitor.m TRRootOps.m 2>&1 | tee build-dylib.log
+          ls -la dist/BatteryGuard.dylib
+          file dist/BatteryGuard.dylib
+          otool -L dist/BatteryGuard.dylib
+          strings -a dist/BatteryGuard.dylib | grep -c "BatteryGuard 1.0"
 
       - name: Build insert_dylib
         run: |
@@ -99,7 +104,7 @@ jobs:
           cp /tmp/orig-ent.plist work/orig-ent.plist
 
           # 放入 dylib 并签名
-          cp BatteryGuard.dylib "$APP/BatteryGuard.dylib"
+          cp dist/BatteryGuard.dylib "$APP/BatteryGuard.dylib"
           ldid -S "$APP/BatteryGuard.dylib"
 
           # 插入 LC_LOAD_DYLIB（--strip-codesig：插入后原签名失效，随后 ldid 重签）
@@ -173,5 +178,5 @@ jobs:
         with:
           name: inject-logs
           path: |
-            BatteryGuard/build-dylib.log
+            build-dylib.log
           if-no-files-found: ignore

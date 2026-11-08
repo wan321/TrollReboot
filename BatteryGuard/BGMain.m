@@ -15,7 +15,10 @@
 #import <unistd.h>
 #import <errno.h>
 #import <time.h>
+#import <math.h>
+#import <pthread.h>
 #import <stdlib.h>
+#import <dispatch/dispatch.h>
 
 #import "TRBattery.h"
 #import "TRMonitor.h"
