@@ -543,6 +543,7 @@ static NSString *BGSafetyText(NSDictionary *st)
 static NSInteger gStuckSec = 0;
 static NSInteger gGraceSec = 0;
 static NSInteger gTickSeq = 0;
+static NSUInteger gRawPos = 0;
 static BOOL gRebooting = NO;
 
 static void BGTick(void)
@@ -642,6 +643,25 @@ static void BGTick(void)
 		[panel addObject:[NSString stringWithFormat:@"阻断:%@", block]];
 	if (sample[@"error"])
 		[panel addObject:[NSString stringWithFormat:@"缺失:%@", sample[@"error"]]];
+
+	// App 原始字段整份滚动展示（面板一行窗口滚动，日志里每轮全量落盘）
+	if (appDump.length)
+	{
+		NSUInteger window = 110;
+		NSString *shown = appDump;
+		if (appDump.length > window)
+		{
+			if (gRawPos + window > appDump.length)
+				gRawPos = 0;
+			shown = [NSString stringWithFormat:@"…%@…（%lu字 %lu–%lu）",
+			                                   [appDump substringWithRange:NSMakeRange(gRawPos, window)],
+			                                   (unsigned long)appDump.length,
+			                                   (unsigned long)gRawPos,
+			                                   (unsigned long)(gRawPos + window)];
+			gRawPos = (gRawPos + window) % appDump.length;
+		}
+		[panel addObject:[@"原始:" stringByAppendingString:shown]];
+	}
 
 	BGUpdateText([panel componentsJoinedByString:@"\n"]);
 
