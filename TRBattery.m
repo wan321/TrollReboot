@@ -224,7 +224,15 @@ NSDictionary *TRBatteryRead(void)
 	NSNumber *temp = TRNum(p[@"Temperature"]);
 	if (temp == nil) temp = TRNum(alt[@"Temperature"]);
 	if (temp)
-		out[@"temperatureDeciC"] = temp;
+	{
+		// 这个字段不同机型单位不一样：多数是 0.1℃（2769 → 27.7℃），
+		// 也有以 0.1K 报的（3001 → 27.0℃）。按量级自动判断，避免显示成 276.9℃。
+		double raw = [temp doubleValue];
+		double deciC = raw / 10.0;
+		double degC = (deciC >= 5.0 && deciC <= 80.0) ? deciC : (deciC - 273.15);
+		out[@"tempC"] = @(degC);
+		out[@"tempRaw"] = temp;
+	}
 
 	NSNumber *cap = TRNum(p[@"CurrentCapacity"]);
 	if (cap)
@@ -276,6 +284,43 @@ BOOL TRBatteryLooksStuck(NSDictionary *s, int currentThresholdMA)
 	return YES;
 }
 
+/// 监控判定预览（只判断、不执行任何动作）：把 7 条联合条件逐条走一遍，
+/// 返回「会触发 / 不会触发（原因）」，方便真机确认监控不会误判。
+NSString *TRMonitorVerdict(NSDictionary *s)
+{
+	if (![s[@"ok"] boolValue])
+		return @"监控预览：不触发（读不到电池）";
+
+	if (![s[@"external"] boolValue])
+		return @"监控预览：不触发（没插充电器）"; // 硬条件：没插电绝不执行
+
+	if (![s[@"charging"] boolValue])
+		return @"监控预览：不触发（系统未在充电：已充满/优化充电/高温/涓流）";
+
+	NSNumber *cur = s[@"currentMA"];
+	if (cur == nil)
+		return @"监控预览：不触发（电流读数缺失）";
+
+	long mA = labs((long)[cur integerValue]);
+	if (mA >= 50)
+		return [NSString stringWithFormat:@"监控预览：不触发（电流 %ldmA 不为 0）", mA];
+
+	NSNumber *pct = s[@"percent"];
+	if (pct && [pct integerValue] >= 100)
+		return @"监控预览：不触发（电量已 100%）";
+
+	NSNumber *raw = s[@"rawCapacity"];
+	NSNumber *rawMax = s[@"rawMaxCapacity"];
+	if (raw && rawMax && [raw integerValue] >= [rawMax integerValue])
+		return @"监控预览：不触发（已达满容量）";
+
+	NSNumber *t = s[@"tempC"];
+	if (t && ([t doubleValue] < 0.0 || [t doubleValue] > 45.0))
+		return [NSString stringWithFormat:@"监控预览：不触发（温度 %.1f℃ 超出 0–45℃）", [t doubleValue]];
+
+	return @"监控预览：✅ 条件成立（连续 5 分钟都这样才会重启）";
+}
+
 NSString *TRBatteryLine(NSDictionary *s)
 {
 	time_t now = time(NULL);
@@ -291,14 +336,17 @@ NSString *TRBatteryLine(NSDictionary *s)
 
 	NSNumber *cur = s[@"currentMA"];
 	NSNumber *volt = s[@"voltageMV"];
-	NSNumber *temp = s[@"temperatureDeciC"];
+	NSNumber *temp = s[@"tempC"];
 	NSNumber *pct = s[@"percent"];
 	NSNumber *raw = s[@"rawCapacity"];
 	NSNumber *rawMax = s[@"rawMaxCapacity"];
 
 	NSString *tempStr = @"?";
 	if (temp)
-		tempStr = [NSString stringWithFormat:@"%.1f℃", [temp doubleValue] / 10.0];
+	{
+		tempStr = [NSString stringWithFormat:@"%.1f℃(raw %ld)", [temp doubleValue],
+		                                     (long)[(s[@"tempRaw"] ?: @0) integerValue]];
+	}
 
 	NSString *capStr = @"?";
 	if (pct)
@@ -311,8 +359,9 @@ NSString *TRBatteryLine(NSDictionary *s)
 	}
 
 	NSString *stuck = TRBatteryLooksStuck(s, 50) ? @"  ⚠️满足0电流条件" : @"";
+	NSString *verdict = TRMonitorVerdict(s);
 
-	return [NSString stringWithFormat:@"%s 插电=%@ 充电=%@ 电流=%@mA 电压=%@mV 温度=%@ 电量=%@ 满=%@%@",
+	return [NSString stringWithFormat:@"%s 插电=%@ 充电=%@ 电流=%@mA 电压=%@mV 温度=%@ 电量=%@ 满=%@%@\n      %@",
 	                                  hhmmss,
 	                                  [s[@"external"] boolValue] ? @"是" : @"否",
 	                                  [s[@"charging"] boolValue] ? @"是" : @"否",
@@ -321,5 +370,6 @@ NSString *TRBatteryLine(NSDictionary *s)
 	                                  tempStr,
 	                                  capStr,
 	                                  [s[@"fullyCharged"] boolValue] ? @"是" : @"否",
-	                                  stuck];
+	                                  stuck,
+	                                  verdict];
 }

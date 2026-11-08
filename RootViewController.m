@@ -45,7 +45,7 @@
 	CGFloat pad = 16.0;
 
 	self.titleLabel = [[UILabel alloc] initWithFrame:CGRectMake(pad, 48, w - pad * 2, 36)];
-	self.titleLabel.text = @"TrollReboot 3.5-probe3";
+	self.titleLabel.text = @"TrollReboot 3.5-probe4";
 	self.titleLabel.font = [UIFont boldSystemFontOfSize:28];
 	[self.view addSubview:self.titleLabel];
 
@@ -159,7 +159,7 @@
 - (void)refreshStatus
 {
 	NSMutableString *m = [NSMutableString string];
-	[m appendFormat:@"build = TrollReboot 3.5-probe3\n"];
+	[m appendFormat:@"build = TrollReboot 3.5-probe4\n"];
 	[m appendFormat:@"app uid=%u euid=%u\n", getuid(), geteuid()];
 
 	[m appendString:@"\n"];
@@ -321,7 +321,15 @@
 			NSString *elapsed = [NSString stringWithFormat:
 				@"探针中 · 已 %ld 秒 · 数据来自 root 守护 /battery · 日志 Documents/charge-probe.log",
 				(long)(time(NULL) - self.probeStart)];
-			NSString *bodyText = [self.probeLines componentsJoinedByString:@"\n"];
+			// 采样是异步回来的，#16 可能比 #15 先到，显示前按编号排一下
+			NSArray<NSString *> *ordered = [self.probeLines sortedArrayUsingComparator:^NSComparisonResult(NSString *a, NSString *b) {
+				NSInteger na = [a hasPrefix:@"#"] ? [[a substringFromIndex:1] integerValue] : 0;
+				NSInteger nb = [b hasPrefix:@"#"] ? [[b substringFromIndex:1] integerValue] : 0;
+				if (na < nb) return NSOrderedAscending;
+				if (na > nb) return NSOrderedDescending;
+				return NSOrderedSame;
+			}];
+			NSString *bodyText = [ordered componentsJoinedByString:@"\n"];
 			self.probeView.text = [NSString stringWithFormat:@"%@\n%@", elapsed, bodyText];
 			[self.probeView scrollRangeToVisible:NSMakeRange(self.probeView.text.length, 0)];
 
