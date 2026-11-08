@@ -288,6 +288,47 @@ static NSString *TRDaemonPlistText(NSString *exe)
 
 #pragma mark - 安装 / 卸载
 
+static BOOL TRWritePlist(NSString *plist, NSString *path, NSString **detail)
+{
+	NSFileManager *fm = [NSFileManager defaultManager];
+	NSError *err = nil;
+
+	// 目录不存在就建（/Library/LaunchDaemons 在干净系统里可能不存在）
+	NSString *dir = [path stringByDeletingLastPathComponent];
+	if (![fm fileExistsAtPath:dir])
+	{
+		[fm createDirectoryAtPath:dir withIntermediateDirectories:YES attributes:nil error:nil];
+	}
+
+	if (![plist writeToFile:path atomically:YES encoding:NSUTF8StringEncoding error:&err])
+	{
+		if (detail) *detail = [NSString stringWithFormat:@"写 %@ 失败: %@", path, err.localizedDescription];
+		return NO;
+	}
+	[fm setAttributes:@{NSFilePosixPermissions: @0644,
+	                    NSFileOwnerAccountName: @"root",
+	                    NSFileGroupOwnerAccountName: @"wheel"}
+	     ofItemAtPath:path error:nil];
+	if (detail) *detail = [NSString stringWithFormat:@"plist 已写入 %@", path];
+	return YES;
+}
+
+/// 尝试把根文件系统挂回可写，返回日志
+static NSString *TRRemountRoot(void)
+{
+	NSFileManager *fm = [NSFileManager defaultManager];
+	NSArray *candidates = @[@"/sbin/mount", @"/usr/bin/mount", @"/bin/mount"];
+	NSString *log = nil;
+
+	for (NSString *tool in candidates)
+	{
+		if (![fm fileExistsAtPath:tool]) continue;
+		TRRunCmd(tool, @[@"-u", @"-o", @"rw", @"/"], &log);
+		return log ?: [NSString stringWithFormat:@"执行了 %@ 但无输出", tool];
+	}
+	return @"系统里没有 mount 命令（/sbin/mount、/usr/bin/mount 都不存在），无法重挂根分区";
+}
+
 int TRInstallDaemon(void)
 {
 	@autoreleasepool
@@ -310,74 +351,72 @@ int TRInstallDaemon(void)
 		}
 		TRAppendLog(@"install.log", [NSString stringWithFormat:@"exe=%@", exe]);
 
-		NSString *plist = TRDaemonPlistText(exe);
 		NSFileManager *fm = [NSFileManager defaultManager];
-		NSString *log = nil;
-		NSError *err = nil;
+		BOOL hasLaunchctl = [fm fileExistsAtPath:@TR_LAUNCHCTL];
+		TRAppendLog(@"install.log", hasLaunchctl
+			? @"检测到 /bin/launchctl，可用命令登记作业"
+			: @"系统无 /bin/launchctl（干净 iOS 不带它）→ 改为把 plist 放到位，交给 launchd 开机自己扫");
 
-		// ---- 第 1 步：写 /Library/LaunchDaemons 并 bootstrap ----
-		if (![plist writeToFile:@TR_DAEMON_PLIST atomically:YES encoding:NSUTF8StringEncoding error:&err])
+		NSString *plist = TRDaemonPlistText(exe);
+		NSString *detail = nil;
+		NSString *log = nil;
+
+		// ---- 1) /Library/LaunchDaemons ----
+		BOOL wroteLib = TRWritePlist(plist, @TR_DAEMON_PLIST, &detail);
+		TRAppendLog(@"install.log", detail ?: @"");
+
+		// ---- 2) /System/Library/LaunchDaemons（boot 时 launchd 一定会扫这里）----
+		BOOL wroteSys = TRWritePlist(plist, @TR_SYSTEM_PLIST, &detail);
+		if (!wroteSys)
 		{
-			TRAppendLog(@"install.log", [NSString stringWithFormat:@"写 %s 失败: %@",
-				TR_DAEMON_PLIST, err.localizedDescription]);
+			TRAppendLog(@"install.log", [NSString stringWithFormat:@"首次写 /System 失败：%@", detail ?: @""]);
+			TRAppendLog(@"install.log", @"---- 尝试把根分区挂回可写 ----");
+			TRAppendLog(@"install.log", TRRemountRoot());
+			wroteSys = TRWritePlist(plist, @TR_SYSTEM_PLIST, &detail);
+		}
+		TRAppendLog(@"install.log", detail ?: @"");
+
+		// ---- 3) 有 launchctl 就顺手登记（没有就跳过，不影响开机生效）----
+		int rc = -1;
+		int printRc = -1;
+		if (hasLaunchctl)
+		{
+			rc = TRRunCmd(@TR_LAUNCHCTL, @[@"bootstrap", @"system", @TR_DAEMON_PLIST], &log);
+			TRAppendLog(@"install.log", log);
+			if (rc != 0)
+			{
+				rc = TRRunCmd(@TR_LAUNCHCTL, @[@"load", @"-w", @TR_DAEMON_PLIST], &log);
+				TRAppendLog(@"install.log", log);
+			}
+			if (rc != 0 && wroteSys)
+			{
+				rc = TRRunCmd(@TR_LAUNCHCTL, @[@"bootstrap", @"system", @TR_SYSTEM_PLIST], &log);
+				TRAppendLog(@"install.log", log);
+			}
+			printRc = TRRunCmd(@TR_LAUNCHCTL,
+				@[@"print", [NSString stringWithFormat:@"system/%s", TR_DAEMON_LABEL]], &log);
+			TRAppendLog(@"install.log", log);
 		}
 		else
 		{
-			[fm setAttributes:@{NSFilePosixPermissions: @0644,
-			                    NSFileOwnerAccountName: @"root",
-			                    NSFileGroupOwnerAccountName: @"wheel"}
-			     ofItemAtPath:@TR_DAEMON_PLIST error:nil];
-			TRAppendLog(@"install.log", @"plist 已写入 /Library/LaunchDaemons");
+			TRAppendLog(@"install.log", @"跳过 launchctl（不存在）");
 		}
 
-		int rc = TRRunCmd(@TR_LAUNCHCTL, @[@"bootstrap", @"system", @TR_DAEMON_PLIST], &log);
-		TRAppendLog(@"install.log", log);
+		// ---- 4) 结论 ----
+		TRAppendLog(@"install.log", [NSString stringWithFormat:
+			@"结果：/Library=%@  /System=%@  bootstrap rc=%d  print rc=%d",
+			wroteLib ? @"OK" : @"失败", wroteSys ? @"OK" : @"失败", rc, printRc]);
 
-		// ---- 第 2 步：老式 load -w ----
-		if (rc != 0)
-		{
-			rc = TRRunCmd(@TR_LAUNCHCTL, @[@"load", @"-w", @TR_DAEMON_PLIST], &log);
-			TRAppendLog(@"install.log", log);
-		}
+		if (printRc == 0)
+			TRAppendLog(@"install.log", @"✅ launchd 已登记，立即生效");
+		else if (wroteSys)
+			TRAppendLog(@"install.log", @"✅ plist 已落到 /System/Library/LaunchDaemons —— 重启手机后 launchd 会自己加载它");
+		else if (wroteLib)
+			TRAppendLog(@"install.log", @"⚠️ 只写进了 /Library/LaunchDaemons，没有 launchctl 无法确认 launchd 会扫这里，重启后实测");
+		else
+			TRAppendLog(@"install.log", @"❌ 两个位置都没写进去（根分区只读且无法重挂）");
 
-		// ---- 第 3 步：写入 /System/Library/LaunchDaemons（iOS 14 无 SSV，root 可写）----
-		if (rc != 0)
-		{
-			TRAppendLog(@"install.log", @"---- 回退：尝试写入 /System/Library/LaunchDaemons ----");
-			TRRunCmd(@"/sbin/mount", @[@"-u", @"-o", @"rw", @"/"], &log);
-			TRAppendLog(@"install.log", log);
-
-			if ([plist writeToFile:@TR_SYSTEM_PLIST atomically:YES encoding:NSUTF8StringEncoding error:&err])
-			{
-				[fm setAttributes:@{NSFilePosixPermissions: @0644,
-				                    NSFileOwnerAccountName: @"root",
-				                    NSFileGroupOwnerAccountName: @"wheel"}
-				     ofItemAtPath:@TR_SYSTEM_PLIST error:nil];
-				TRAppendLog(@"install.log", @"plist 已写入 /System/Library/LaunchDaemons");
-
-				rc = TRRunCmd(@TR_LAUNCHCTL, @[@"bootstrap", @"system", @TR_SYSTEM_PLIST], &log);
-				TRAppendLog(@"install.log", log);
-				if (rc != 0)
-				{
-					rc = TRRunCmd(@TR_LAUNCHCTL, @[@"load", @"-w", @TR_SYSTEM_PLIST], &log);
-					TRAppendLog(@"install.log", log);
-				}
-			}
-			else
-			{
-				TRAppendLog(@"install.log", [NSString stringWithFormat:
-					@"写 /System plist 失败: %@（大概率是根文件系统只读且无法重挂）", err.localizedDescription]);
-			}
-		}
-
-		// ---- 第 4 步：验证作业是否真的进了 launchd ----
-		int printRc = TRRunCmd(@TR_LAUNCHCTL,
-			@[@"print", [NSString stringWithFormat:@"system/%s", TR_DAEMON_LABEL]], &log);
-		TRAppendLog(@"install.log", log);
-		TRAppendLog(@"install.log", printRc == 0 ? @"✅ launchd 已登记该作业" : @"❌ launchd 未登记该作业");
-		TRAppendLog(@"install.log", [NSString stringWithFormat:@"install done rc=%d printRc=%d", rc, printRc]);
-
-		return printRc == 0 ? 0 : (rc != 0 ? rc : 4);
+		return (printRc == 0 || wroteSys || wroteLib) ? 0 : 5;
 	}
 }
 
@@ -385,19 +424,21 @@ int TRUninstallDaemon(void)
 {
 	@autoreleasepool
 	{
+		NSFileManager *fm = [NSFileManager defaultManager];
 		NSString *label = [NSString stringWithFormat:@"system/%s", TR_DAEMON_LABEL];
 		NSString *log = nil;
 
-		TRRunCmd(@TR_LAUNCHCTL, @[@"bootout", label], &log);
-		TRAppendLog(@"install.log", log);
+		if ([fm fileExistsAtPath:@TR_LAUNCHCTL])
+		{
+			TRRunCmd(@TR_LAUNCHCTL, @[@"bootout", label], &log);
+			TRAppendLog(@"install.log", log ?: @"bootout");
+			TRRunCmd(@TR_LAUNCHCTL, @[@"unload", @"-w", @TR_DAEMON_PLIST], &log);
+			TRAppendLog(@"install.log", log ?: @"unload");
+		}
 
-		TRRunCmd(@TR_LAUNCHCTL, @[@"unload", @"-w", @TR_DAEMON_PLIST], &log);
-		TRAppendLog(@"install.log", log);
-
-		NSFileManager *fm = [NSFileManager defaultManager];
 		[fm removeItemAtPath:@TR_DAEMON_PLIST error:nil];
 		[fm removeItemAtPath:@TR_SYSTEM_PLIST error:nil];
-		TRAppendLog(@"install.log", @"已删除两个 plist");
+		TRAppendLog(@"install.log", @"已删除 /Library 与 /System 两处 plist");
 		return 0;
 	}
 }

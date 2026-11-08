@@ -46,7 +46,7 @@
 	self.daemonButton = [self makeButton:@"① 启用后台守护（立即生效）" y:132 color:[UIColor systemBlueColor]];
 	[self.daemonButton addTarget:self action:@selector(enableDaemonTapped) forControlEvents:UIControlEventTouchUpInside];
 
-	self.autostartButton = [self makeButton:@"② 设为开机自启（写 launchd）" y:184 color:[UIColor systemIndigoColor]];
+	self.autostartButton = [self makeButton:@"② 设为开机自启（重启后生效）" y:184 color:[UIColor systemIndigoColor]];
 	[self.autostartButton addTarget:self action:@selector(autostartTapped) forControlEvents:UIControlEventTouchUpInside];
 
 	[self makeSmallButton:@"移除自启" x:pad action:@selector(uninstallTapped)];
