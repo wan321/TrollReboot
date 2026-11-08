@@ -36,3 +36,6 @@ int TRUninstallDaemonViaRoot(void);
 
 /// 诊断：挂载表 + 关键路径可写探测
 NSString *TRPathsProbe(void);
+
+/// 诊断：枚举可替换的系统 App（/private/var/containers）与巨魔持久化助手占用情况
+NSString *TRSystemAppsProbe(void);

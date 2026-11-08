@@ -331,6 +331,46 @@ NSString *TRPathsProbe(void)
 	}
 	return m;
 }
+NSString *TRSystemAppsProbe(void)
+{
+	NSMutableString *m = [NSMutableString string];
+	NSFileManager *fm = [NSFileManager defaultManager];
+
+	[m appendString:@"--- 可替换系统App (/private/var/containers) ---\n"];
+	NSString *root = @"/private/var/containers/Bundle/Application";
+	NSArray *containers = [fm contentsOfDirectoryAtPath:root error:nil];
+	if (containers.count == 0) [m appendString:@"(读不到，可能权限不足)\n"];
+
+	for (NSString *c in containers)
+	{
+		NSString *appDir = [root stringByAppendingPathComponent:c];
+		NSArray *inners = [fm contentsOfDirectoryAtPath:appDir error:nil];
+		for (NSString *inner in inners)
+		{
+			if (![inner hasSuffix:@".app"]) continue;
+			NSString *bundle = [appDir stringByAppendingPathComponent:inner];
+			NSDictionary *info = [NSDictionary dictionaryWithContentsOfFile:
+				[bundle stringByAppendingPathComponent:@"Info.plist"]];
+			NSString *bid = info[@"CFBundleIdentifier"] ?: @"?";
+			NSString *exe = info[@"CFBundleExecutable"] ?: @"?";
+			BOOL marked = [fm fileExistsAtPath:[bundle stringByAppendingPathComponent:@".TrollStorePersistenceHelper"]];
+			BOOL backup = [fm fileExistsAtPath:[bundle stringByAppendingPathComponent:
+				[exe stringByAppendingString:@"_TROLLSTORE_BACKUP"]]];
+			BOOL helper = [fm fileExistsAtPath:[bundle stringByAppendingPathComponent:@"trollstorehelper"]];
+			[m appendFormat:@"%@\n  exe=%@ 巨魔标记=%@ 原件备份=%@ helper=%@\n",
+				bid, exe, marked ? @"Y" : @"N", backup ? @"Y" : @"N", helper ? @"Y" : @"N"];
+		}
+	}
+
+	[m appendString:@"--- 只读系统App (/Applications) ---\n"];
+	NSArray *apps = [fm contentsOfDirectoryAtPath:@"/Applications" error:nil];
+	for (NSString *a in apps)
+	{
+		if (![a hasSuffix:@".app"]) continue;
+		[m appendFormat:@"%@\n", a];
+	}
+	return m;
+}
 #pragma mark - 安装 / 卸载
 
 static BOOL TRWritePlist(NSString *plist, NSString *path, NSString **detail)

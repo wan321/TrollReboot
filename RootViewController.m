@@ -32,7 +32,7 @@
 	CGFloat pad = 16.0;
 
 	self.titleLabel = [[UILabel alloc] initWithFrame:CGRectMake(pad, 48, w - pad * 2, 36)];
-	self.titleLabel.text = @"TrollReboot 2.0";
+	self.titleLabel.text = @"TrollReboot 3.0";
 	self.titleLabel.font = [UIFont boldSystemFontOfSize:28];
 	[self.view addSubview:self.titleLabel];
 
@@ -135,7 +135,7 @@
 - (void)refreshStatus
 {
 	NSMutableString *m = [NSMutableString string];
-	[m appendFormat:@"build = TrollReboot 2.0\n"];
+	[m appendFormat:@"build = TrollReboot 3.0\n"];
 	[m appendFormat:@"app uid=%u euid=%u\n", getuid(), geteuid()];
 
 	NSDictionary *st = TRDaemonStatus();
@@ -157,6 +157,7 @@
 
 	[m appendString:@"\n"];
 	[m appendString:TRPathsProbe()];
+	[m appendString:TRSystemAppsProbe()];
 	[m appendString:@"\n--- install.log 尾部 ---\n"];
 	[m appendString:TRInstallLogTail(14)];
 	[m appendString:@"\n--- daemon.log 尾部 ---\n"];
