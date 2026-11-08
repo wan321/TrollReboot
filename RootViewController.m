@@ -78,7 +78,7 @@ static double TRMemoryUsageMB(void)
 @property (nonatomic, strong) UIImageView *batteryIcon;
 @property (nonatomic, strong) UITextView *infoView;
 @property (nonatomic, strong) UITextView *logView;
-@property (nonatomic, strong) UIButton *copyStateButton;
+@property (nonatomic, strong) UIButton *clipboardButton;
 @property (nonatomic, strong) UIButton *rebootButton;
 
 @property (nonatomic, strong) NSTimer *probeTimer;
@@ -145,15 +145,15 @@ static double TRMemoryUsageMB(void)
 	y += infoH + 8;
 
 	CGFloat bw = (w - pad * 2 - 10) / 2.0;
-	self.copyStateButton = [UIButton buttonWithType:UIButtonTypeSystem];
-	self.copyStateButton.frame = CGRectMake(pad, y, bw, 44);
-	[self.copyStateButton setTitle:@"复制状态" forState:UIControlStateNormal];
-	self.copyStateButton.titleLabel.font = [UIFont systemFontOfSize:17 weight:UIFontWeightMedium];
-	self.copyStateButton.layer.borderColor = [UIColor colorWithRed:0.29 green:0.87 blue:0.31 alpha:1.0].CGColor;
-	self.copyStateButton.layer.borderWidth = 1.5;
-	self.copyStateButton.layer.cornerRadius = 22;
-	[self.copyStateButton addTarget:self action:@selector(copyTapped) forControlEvents:UIControlEventTouchUpInside];
-	[self.view addSubview:self.copyStateButton];
+	self.clipboardButton = [UIButton buttonWithType:UIButtonTypeSystem];
+	self.clipboardButton.frame = CGRectMake(pad, y, bw, 44);
+	[self.clipboardButton setTitle:@"复制状态" forState:UIControlStateNormal];
+	self.clipboardButton.titleLabel.font = [UIFont systemFontOfSize:17 weight:UIFontWeightMedium];
+	self.clipboardButton.layer.borderColor = [UIColor colorWithRed:0.29 green:0.87 blue:0.31 alpha:1.0].CGColor;
+	self.clipboardButton.layer.borderWidth = 1.5;
+	self.clipboardButton.layer.cornerRadius = 22;
+	[self.clipboardButton addTarget:self action:@selector(copyTapped) forControlEvents:UIControlEventTouchUpInside];
+	[self.view addSubview:self.clipboardButton];
 
 	self.rebootButton = [UIButton buttonWithType:UIButtonTypeSystem];
 	self.rebootButton.frame = CGRectMake(pad + bw + 10, y, bw, 44);
