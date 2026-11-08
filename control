@@ -1,6 +1,6 @@
 Package: com.wan.trollreboot
 Name: TrollReboot
-Version: 3.2
+Version: 3.3
 Architecture: iphoneos-arm
 Description: TrollStore-native reboot triggered through the official trollstorehelper
 Maintainer: wan

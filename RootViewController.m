@@ -32,7 +32,7 @@
 	CGFloat pad = 16.0;
 
 	self.titleLabel = [[UILabel alloc] initWithFrame:CGRectMake(pad, 48, w - pad * 2, 36)];
-	self.titleLabel.text = @"TrollReboot 3.2";
+	self.titleLabel.text = @"TrollReboot 3.3";
 	self.titleLabel.font = [UIFont boldSystemFontOfSize:28];
 	[self.view addSubview:self.titleLabel];
 
@@ -40,7 +40,7 @@
 	self.hintLabel.numberOfLines = 0;
 	self.hintLabel.font = [UIFont systemFontOfSize:11];
 	self.hintLabel.textColor = [UIColor secondaryLabelColor];
-	self.hintLabel.text = @"v3.2 沿用 TrollStore 持久化助手的机制，但换个宿主：把「Watch」的主可执行换成我们（原件自动备份，TrollStore 的 GTA Tracker 完全不碰）。\n系统每次拉起 Watch 时先起 root 守护，所以重启后只解锁、不用开 App。\n点 ② 安装 → 重启手机 → 只解锁等 30 秒看心跳。\n锁屏触发：快捷指令「获取 URL 内容」访问 http://127.0.0.1:8899/reboot";
+	self.hintLabel.text = @"v3.3 沿用 TrollStore 持久化助手的机制，宿主是「Watch」（原件自动备份，GTA Tracker 完全不碰）。\n本版是诊断版：安装时会把 uid/euid、写权限探针、原始 errno 打进 launcher.log。\n锁屏触发：快捷指令「获取 URL 内容」访问 http://127.0.0.1:8899/reboot";
 	[self.view addSubview:self.hintLabel];
 
 	self.daemonButton = [self makeButton:@"① 启用后台守护（当前开机周期内生效）" y:142 color:[UIColor systemBlueColor]];
@@ -113,7 +113,7 @@
 - (void)refreshStatus
 {
 	NSMutableString *m = [NSMutableString string];
-	[m appendFormat:@"build = TrollReboot 3.2\n"];
+	[m appendFormat:@"build = TrollReboot 3.3\n"];
 	[m appendFormat:@"app uid=%u euid=%u\n", getuid(), geteuid()];
 
 	[m appendString:@"\n"];

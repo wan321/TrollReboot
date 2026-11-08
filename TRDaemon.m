@@ -195,6 +195,16 @@ static NSString *TRHandleRequest(NSString *path)
 		TRKillSpringBoard();
 		return @"respring sent";
 	}
+	if ([path hasPrefix:@"/uninstall-launcher"])
+	{
+		int lrc = TRUninstallLauncher();
+		return [NSString stringWithFormat:@"uninstall-launcher rc=%d euid=%u", lrc, geteuid()];
+	}
+	if ([path hasPrefix:@"/install-launcher"])
+	{
+		int lrc = TRInstallLauncher();
+		return [NSString stringWithFormat:@"install-launcher rc=%d uid=%u euid=%u", lrc, getuid(), geteuid()];
+	}
 	if ([path hasPrefix:@"/install-hard"])
 	{
 		int rc = TRInstallDaemonHard();
@@ -940,6 +950,8 @@ int TRInstallLauncher(void)
 	{
 		NSFileManager *fm = [NSFileManager defaultManager];
 		TRAppendLog(@"launcher.log", @"----------- install launcher -----------");
+		TRAppendLog(@"launcher.log", [NSString stringWithFormat:
+			@"install enter uid=%u euid=%u gid=%u pid=%d", getuid(), geteuid(), getegid(), getpid()]);
 
 		NSMutableArray *notes = [NSMutableArray array];
 		NSString *bundle = TRPickLauncherBundle(notes);
@@ -978,12 +990,43 @@ int TRInstallLauncher(void)
 		}
 
 		NSError *err = nil;
-		if (![fm moveItemAtPath:exe toPath:backup error:&err])
+
+		// 写权限探针：能否在宿主 bundle 目录里建文件（区分「没权限」与「路径不对」）
+		NSString *probePath = [bundle stringByAppendingPathComponent:@".trwrite"];
+		NSError *probeErr = nil;
+		BOOL probed = [@"x" writeToFile:probePath atomically:YES
+		                       encoding:NSUTF8StringEncoding error:&probeErr];
+		TRAppendLog(@"launcher.log", [NSString stringWithFormat:@"探针 写 %@ = %@%@",
+			probePath, probed ? @"OK" : @"失败",
+			probed ? @"" : [NSString stringWithFormat:@" (errno=%d %@)",
+				errno, probeErr.localizedDescription]]);
+		if (probed) [fm removeItemAtPath:probePath error:nil];
+
+		BOOL moved = NO;
+		errno = 0;
+		if (rename(exe.fileSystemRepresentation, backup.fileSystemRepresentation) == 0)
 		{
-			TRAppendLog(@"launcher.log", [NSString stringWithFormat:
-				@"❌ 备份原件失败：%@", err.localizedDescription]);
-			return 14;
+			moved = YES;
+			TRAppendLog(@"launcher.log", @"备份：rename() 成功");
 		}
+		else
+		{
+			int e1 = errno;
+			TRAppendLog(@"launcher.log", [NSString stringWithFormat:
+				@"rename() 失败 errno=%d (%s)，改用 moveItemAtPath", e1, strerror(e1)]);
+			if ([fm moveItemAtPath:exe toPath:backup error:&err])
+			{
+				moved = YES;
+				TRAppendLog(@"launcher.log", @"备份：moveItemAtPath 成功");
+			}
+			else
+			{
+				TRAppendLog(@"launcher.log", [NSString stringWithFormat:
+					@"❌ 备份原件失败：%@ (NSFileManagerCode=%ld errno=%d %s)",
+					err.localizedDescription, (long)err.code, errno, strerror(errno)]);
+			}
+		}
+		if (!moved) return 14;
 		TRAppendLog(@"launcher.log", [NSString stringWithFormat:@"1/3 原件已改名备份 → %@", backup]);
 
 		NSString *src = [NSBundle mainBundle].executablePath;
@@ -1050,6 +1093,11 @@ int TRUninstallLauncher(void)
 
 int TRLauncherInstallViaRoot(void)
 {
+	// 优先交给已在跑的 root 守护（uid 0 常驻进程，少一层 spawn 变量）
+	NSString *viaDaemon = TRDaemonRequest(@"/install-launcher");
+	TRAppendLog(@"launcher.log", [NSString stringWithFormat:@"请求守护安装 → %@", viaDaemon]);
+	if ([viaDaemon containsString:@"rc=0"]) return 0;
+
 	int rc = TRSpawnSelf(@[@"--install-launcher"], NO);
 	if (rc != 0)
 	{
@@ -1062,6 +1110,9 @@ int TRLauncherInstallViaRoot(void)
 
 int TRLauncherUninstallViaRoot(void)
 {
+	NSString *viaDaemon = TRDaemonRequest(@"/uninstall-launcher");
+	TRAppendLog(@"launcher.log", [NSString stringWithFormat:@"请求守护还原 → %@", viaDaemon]);
+	if ([viaDaemon containsString:@"rc=0"]) return 0;
 	return TRSpawnSelf(@[@"--uninstall-launcher"], NO);
 }
 
