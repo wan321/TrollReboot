@@ -43,8 +43,8 @@ jobs:
         run: |
           set -euo pipefail
           test -f vendor/BatteryInfo_1.0.7.ipa
-          test -f BatteryGuard/Makefile
           test -f BatteryGuard/BGMain.m
+          test -f TRBattery.m
           unzip -l vendor/BatteryInfo_1.0.7.ipa | head -20
 
       - name: Build BatteryGuard.dylib
@@ -172,6 +172,20 @@ jobs:
             dist/sha256.txt
             work/orig-ent.plist
 
+      - name: Expose failure log in repo
+        if: failure()
+        run: |
+          set -euo pipefail
+          mkdir -p ci-logs
+          cp -f build-dylib.log ci-logs/ 2>/dev/null || true
+          date -u > ci-logs/when.txt
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add ci-logs
+          if ! git diff --cached --quiet; then
+            git commit -m "ci: error log [skip ci]"
+            git push || true
+          fi
       - name: Upload logs on failure
         if: failure()
         uses: actions/upload-artifact@v4
