@@ -3,6 +3,7 @@
 #import "TRDaemon.h"
 
 #include <string.h>
+#include <unistd.h>
 
 int main(int argc, char *argv[])
 {
@@ -31,6 +32,14 @@ if (argc > 1 && strcmp(argv[1], "--install-daemon") == 0)
 	if (argc > 1 && strcmp(argv[1], "--uninstall-launcher") == 0)
 	{
 		return TRUninstallLauncher();
+	}
+	// 以 root 运行：直接用我们自己的代码重启，不经过 TrollStore 的任何可执行文件
+	if (argc > 1 && strcmp(argv[1], "--reboot") == 0)
+	{
+		sync();
+		extern int reboot(int);
+		reboot(0);
+		return 1;
 	}
 
 	// 被系统当成 Tips 拉起时：先起守护，再把控制权交还原 App

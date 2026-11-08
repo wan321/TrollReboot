@@ -241,6 +241,26 @@ BOOL TRRequestReboot(NSString **log)
 	NSMutableString *m = [NSMutableString string];
 	[m appendFormat:@"uid=%u euid=%u gid=%u\n", getuid(), geteuid(), getgid()];
 
+	// 1) 优先用我们自己的二进制以 root 执行 reboot(0)：不调用 TrollStore 的任何代码
+	NSString *selfPath = [NSBundle mainBundle].executablePath;
+	if (selfPath.length)
+	{
+		NSString *sOut = nil;
+		NSString *sErr = nil;
+		int selfRc = TRSpawnRoot(selfPath, @[@"--reboot"], &sOut, &sErr);
+		[m appendFormat:@"自有 --reboot: exit=%d stdout=%@ stderr=%@\n",
+			selfRc,
+			sOut.length ? sOut : @"(空)",
+			sErr.length ? sErr : @"(空)"];
+		if (selfRc == 0) { if (log) *log = [m copy]; return YES; }
+	}
+	else
+	{
+		[m appendString:@"自有 --reboot: 取不到主可执行路径\n"];
+	}
+
+	// 2) 兜底：只读执行 TrollStore 自带 trollstorehelper 的 reboot 子命令（不改它任何文件）
+	[m appendString:@"→ 自有路径失败，改用 trollstorehelper 兜底\n"];
 	NSString *helper = TRFindTrollStoreHelper();
 	if (!helper)
 	{
