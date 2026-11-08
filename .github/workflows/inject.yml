@@ -1,0 +1,177 @@
+name: Inject BatteryGuard into BatteryInfo
+
+# 把 TrollReboot 的「充电卡死自动重启」能力注入「电池助手 1.0.7」：
+# 只新增一个 BatteryGuard.dylib 并插一条 LC_LOAD_DYLIB，App 原有代码一个字节都不改。
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - 'BatteryGuard/**'
+      - 'TRBattery.m'
+      - 'TRBattery.h'
+      - 'TRMonitor.m'
+      - 'TRMonitor.h'
+      - 'TRRootOps.m'
+      - 'TRRootOps.h'
+      - 'vendor/**'
+      - '.github/workflows/inject.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  inject:
+    name: Build injected TIPA
+    runs-on: macos-latest
+
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: brew install ldid xz
+
+      - name: Install Theos
+        run: |
+          set -euo pipefail
+          git clone --recursive https://github.com/theos/theos.git "$GITHUB_WORKSPACE/theos"
+          echo "THEOS=$GITHUB_WORKSPACE/theos" >> "$GITHUB_ENV"
+          echo "$GITHUB_WORKSPACE/theos/bin" >> "$GITHUB_PATH"
+
+      - name: Check inputs
+        run: |
+          set -euo pipefail
+          test -f vendor/BatteryInfo_1.0.7.ipa
+          test -f BatteryGuard/Makefile
+          test -f BatteryGuard/BGMain.m
+          unzip -l vendor/BatteryInfo_1.0.7.ipa | head -20
+
+      - name: Build BatteryGuard.dylib
+        run: |
+          set -euo pipefail
+          cd BatteryGuard
+          make clean || true
+          set -o pipefail
+          make 2>&1 | tee build-dylib.log
+          DYLIB=$(find .theos -name 'BatteryGuard.dylib' -type f | head -1)
+          test -n "$DYLIB"
+          cp "$DYLIB" "$GITHUB_WORKSPACE/BatteryGuard.dylib"
+          ls -la "$GITHUB_WORKSPACE/BatteryGuard.dylib"
+          file "$GITHUB_WORKSPACE/BatteryGuard.dylib"
+
+      - name: Build insert_dylib
+        run: |
+          set -euo pipefail
+          git clone --depth 1 https://github.com/Tyilo/insert_dylib.git /tmp/insert_dylib
+          cd /tmp/insert_dylib
+          xcodebuild -project insert_dylib.xcodeproj -target insert_dylib \
+            -configuration Release SYMROOT="$PWD/build" CODE_SIGNING_ALLOWED=NO 2>&1 | tail -20
+          cp build/Release/insert_dylib /usr/local/bin/insert_dylib
+          chmod +x /usr/local/bin/insert_dylib
+
+      - name: Unpack IPA
+        run: |
+          set -euo pipefail
+          rm -rf work && mkdir -p work
+          unzip -q vendor/BatteryInfo_1.0.7.ipa -d work/ipa
+          APP=$(find work/ipa/Payload -maxdepth 1 -name '*.app' | head -1)
+          test -n "$APP"
+          echo "APP=$APP" >> "$GITHUB_ENV"
+          BIN_NAME=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "$APP/Info.plist")
+          echo "BIN_NAME=$BIN_NAME" >> "$GITHUB_ENV"
+          ls -la "$APP"
+
+      - name: Inject dylib and resign
+        run: |
+          set -euo pipefail
+          APP="$APP"
+          BIN="$APP/$BIN_NAME"
+          test -x "$BIN"
+
+          echo "--- 原始二进制 ---"
+          ls -la "$BIN"
+          file "$BIN"
+
+          # 原始 entitlements 备份（重签必须原样带回去，否则 App 的 IOKit 权限就没了）
+          ldid -e "$BIN" > /tmp/orig-ent.plist
+          cat /tmp/orig-ent.plist
+          cp /tmp/orig-ent.plist work/orig-ent.plist
+
+          # 放入 dylib 并签名
+          cp BatteryGuard.dylib "$APP/BatteryGuard.dylib"
+          ldid -S "$APP/BatteryGuard.dylib"
+
+          # 插入 LC_LOAD_DYLIB（--strip-codesig：插入后原签名失效，随后 ldid 重签）
+          insert_dylib --strip-codesig --overwrite \
+            "@executable_path/BatteryGuard.dylib" "$BIN" "$BIN.tmp"
+          mv "$BIN.tmp" "$BIN"
+          chmod +x "$BIN"
+
+          # 用原 entitlements 重签 App 主二进制
+          ldid -S/tmp/orig-ent.plist "$BIN"
+
+          echo "--- 注入后 ---"
+          ls -la "$BIN"
+          otool -L "$BIN"
+          otool -l "$BIN" | grep -A2 LC_LOAD_DYLIB | grep -c BatteryGuard
+
+      - name: Package TIPA
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          cd work/ipa
+          zip -qry "$GITHUB_WORKSPACE/dist/BatteryGuard-1.0.7.tipa" Payload
+          cd "$GITHUB_WORKSPACE"
+          ls -la dist
+          shasum -a 256 dist/BatteryGuard-1.0.7.tipa | tee dist/sha256.txt
+
+      - name: Verify package
+        run: |
+          set -euo pipefail
+          rm -rf verify && mkdir verify
+          unzip -q dist/BatteryGuard-1.0.7.tipa -d verify
+          APP=$(find verify/Payload -maxdepth 1 -name '*.app' | head -1)
+          BIN="$APP/$BIN_NAME"
+          test -f "$APP/BatteryGuard.dylib"
+          test -x "$BIN"
+          echo "--- dylib ---"
+          file "$APP/BatteryGuard.dylib"
+          echo "--- 加载项 ---"
+          otool -L "$BIN" | grep BatteryGuard
+          echo "--- 权限 ---"
+          ldid -e "$BIN" | grep -E "platform-application|iokit-user-client-class|persona-mgmt" 
+          echo "--- dylib 内字符串 ---"
+          strings -a "$APP/BatteryGuard.dylib" | grep -E "BatteryGuard 1.0|trollstorehelper|com.wan.batterychargeguard|IOPMPowerSource" | sort -u
+          echo "--- App 自身未被改动（应仍是原体积 ± 插入命令的几百字节）---"
+          stat -f%z "$BIN"
+
+      - name: Publish to repo dist
+        run: |
+          set -euo pipefail
+          cp dist/BatteryGuard-1.0.7.tipa "BatteryGuard-电池助手1.0.7.tipa"
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add "BatteryGuard-电池助手1.0.7.tipa"
+          if ! git diff --cached --quiet; then
+            git commit -m "ci: publish BatteryGuard tipa [skip ci]"
+            git push
+          fi
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: BatteryGuard-tipa
+          path: |
+            dist/BatteryGuard-1.0.7.tipa
+            dist/sha256.txt
+            work/orig-ent.plist
+
+      - name: Upload logs on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: inject-logs
+          path: |
+            BatteryGuard/build-dylib.log
+          if-no-files-found: ignore

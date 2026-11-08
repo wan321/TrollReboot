@@ -29,6 +29,10 @@
 #define TRMON_BREAKER_COUNT 3          // 连续 3 次自动重启后条件仍在 → 判故障，停止自动重启
 #define TRMON_GRACE_SEC 60             // 电流短暂恢复的容忍窗口（秒），超过才清零
 
+/// 切换状态目录（默认 /var/mobile/Library/Caches/com.wan.trollreboot）
+/// BatteryGuard.dylib 在 App 进程里调用，换成自己的目录，避免与 TrollReboot 守护互相踩状态
+void TRMonitorSetDirectory(NSString *dir);
+
 /// 配置文件路径（只有 root 守护写得到）；里面只存一个数字
 NSString *TRMonitorConfigPath(void);
 NSString *TRMonitorStatePath(void);

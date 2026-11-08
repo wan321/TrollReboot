@@ -6,17 +6,31 @@
 #include <errno.h>
 #include <time.h>
 
-static NSString *const TRMonDir = @"/var/mobile/Library/Caches/com.wan.trollreboot";
+// 目录可切换：TrollReboot 用 com.wan.trollreboot；
+// 注入「电池助手」的 BatteryGuard.dylib 启动时调 TRMonitorSetDirectory() 换成自己的目录，
+// 两边状态互不干扰。
+static NSString *gMonDir = nil;
+
+void TRMonitorSetDirectory(NSString *dir)
+{
+	gMonDir = [dir copy];
+}
+
+static NSString *TRMonDirPath(void)
+{
+	return gMonDir.length > 0 ? gMonDir : @"/var/mobile/Library/Caches/com.wan.trollreboot";
+}
+
 static NSString *const TRMonMinutesKey = @"stuckMinutes";
 
 NSString *TRMonitorConfigPath(void)
 {
-	return [TRMonDir stringByAppendingPathComponent:@"monitor.conf"];
+	return [TRMonDirPath() stringByAppendingPathComponent:@"monitor.conf"];
 }
 
 NSString *TRMonitorStatePath(void)
 {
-	return [TRMonDir stringByAppendingPathComponent:@"monitor.state"];
+	return [TRMonDirPath() stringByAppendingPathComponent:@"monitor.state"];
 }
 
 static NSDictionary *TRReadJSON(NSString *path)
