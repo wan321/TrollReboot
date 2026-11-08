@@ -153,14 +153,15 @@ jobs:
 
       - name: Publish to repo dist
         run: |
-          set -euo pipefail
+          set +e
           cp dist/BatteryGuard-1.0.7.tipa "BatteryGuard-电池助手1.0.7.tipa"
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add "BatteryGuard-电池助手1.0.7.tipa"
           if ! git diff --cached --quiet; then
             git commit -m "ci: publish BatteryGuard tipa [skip ci]"
-            git push
+            git pull --rebase -q origin "$GITHUB_REF_NAME" || true
+            git push || echo "push failed (non-fatal)"
           fi
 
       - name: Upload artifacts
