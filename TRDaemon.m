@@ -230,8 +230,9 @@ int TRRunDaemon(void)
 		TRAppendLog(@"daemon.log", [NSString stringWithFormat:@"daemon start uid=%u euid=%u pid=%d",
 			getuid(), geteuid(), getpid()]);
 
+		// v3.4：心跳线程必须在端口抢到之后再启动，否则重复实例会在 bind 失败前先写一次心跳，
+		// 造成「在线但没在听」的假象。
 		pthread_t hb;
-		pthread_create(&hb, NULL, TRHeartbeatThread, NULL);
 
 		int sfd = socket(AF_INET, SOCK_STREAM, 0);
 		if (sfd < 0)
@@ -250,10 +251,9 @@ int TRRunDaemon(void)
 
 		if (bind(sfd, (struct sockaddr *)&addr, sizeof(addr)) < 0)
 		{
-			TRAppendLog(@"daemon.log", [NSString stringWithFormat:@"bind %d failed errno=%d（可能已有实例在跑）",
+			TRAppendLog(@"daemon.log", [NSString stringWithFormat:@"bind %d failed errno=%d（已有实例在跑）",
 				TR_DAEMON_PORT, errno]);
 			close(sfd);
-			TRWriteHeartbeat();
 			return 2;
 		}
 		if (listen(sfd, 8) < 0)
@@ -265,6 +265,7 @@ int TRRunDaemon(void)
 
 		TRAppendLog(@"daemon.log", [NSString stringWithFormat:@"listening on 127.0.0.1:%d", TR_DAEMON_PORT]);
 		TRWriteHeartbeat();
+		pthread_create(&hb, NULL, TRHeartbeatThread, NULL);
 
 		for (;;)
 		{
@@ -882,10 +883,18 @@ int TRRunLauncher(int argc, char *argv[])
 			@"启动器被系统拉起 exe=%@ pid=%d uid=%u euid=%u argc=%d",
 			exe, getpid(), getuid(), geteuid(), argc]);
 
-		// 1) 先起 root 守护（分离进程，不阻塞本进程）
-		int rc = TRSpawnRootDetached(exe, @[@"--daemon"], NULL, NULL);
-		TRAppendLog(@"launcher.log", [NSString stringWithFormat:@"spawn --daemon rc=%d (%s)",
-			rc, rc == 0 ? "ok" : strerror(rc)]);
+		// 1) 先起 root 守护（分离进程，不阻塞本进程）；已在跑就跳过，避免多实例抢端口
+		int rc = 0;
+		if (TRDaemonIsOnline())
+		{
+			TRAppendLog(@"launcher.log", @"守护已在跑，跳过 spawn");
+		}
+		else
+		{
+			rc = TRSpawnRootDetached(exe, @[@"--daemon"], NULL, NULL);
+			TRAppendLog(@"launcher.log", [NSString stringWithFormat:@"spawn --daemon rc=%d (%s)",
+				rc, rc == 0 ? "ok" : strerror(rc)]);
+		}
 
 		// 2) 把控制权交还原 App
 		NSString *backup = [exe stringByAppendingString:TRLauncherBackupSuffix];
@@ -1147,4 +1156,22 @@ NSString *TRLauncherStatusText(void)
 			(ours && bakSize > 0 && exeSize != bakSize) ? @"  (已被替换为启动器)" : @""];
 	}
 	return m;
+}
+
+BOOL TRDaemonIsOnline(void)
+{
+	return [TRDaemonStatus()["online"] boolValue];
+}
+
+int TREnsureDaemonDetached(void)
+{
+	if (TRDaemonIsOnline())
+	{
+		TRAppendLog(@"daemon.log", @"已有守护在跑（心跳新鲜），跳过 spawn");
+		return 0;
+	}
+	int rc = TRSpawnSelf(@[@"--daemon"], YES);
+	TRAppendLog(@"daemon.log", [NSString stringWithFormat:@"守护不在跑，自动补起 rc=%d (%s)",
+		rc, rc == 0 ? "ok" : strerror(rc)]);
+	return rc;
 }

@@ -119,6 +119,9 @@ jobs:
                     grep -q 'launcher.target' /tmp/strings.txt || { echo "ERROR: launcher.target missing"; exit 1; }
           grep -q -- '/install-launcher' /tmp/strings.txt || { echo "ERROR: /install-launcher endpoint missing"; exit 1; }
           grep -q 'install enter uid=' /tmp/strings.txt || { echo "ERROR: install identity log missing"; exit 1; }
+          grep -q '守护不在跑，自动补起' /tmp/strings.txt || { echo "ERROR: auto-ensure string missing"; exit 1; }
+          grep -q '守护已在跑，跳过 spawn' /tmp/strings.txt || { echo "ERROR: daemon guard string missing"; exit 1; }
+          grep -q '打开 App 时守护不在跑，已自动补起' /tmp/strings.txt || { echo "ERROR: app auto-ensure string missing"; exit 1; }
           grep -q -- '/install-hard' /tmp/strings.txt || { echo "ERROR: /install-hard endpoint missing"; exit 1; }
           grep -q -- '/System/Library/LaunchDaemons' /tmp/strings.txt || { echo "ERROR: /System plist path missing"; exit 1; }
           grep -q '8899' /tmp/strings.txt || echo "WARN: port 8899 literal not found (可能是分段字符串)"

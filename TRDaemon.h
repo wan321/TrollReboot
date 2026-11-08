@@ -23,6 +23,12 @@ NSString *TRDaemonRequest(NSString *path);
 
 int TRLaunchDaemonDetached(void);
 
+/// 守护是否在线（心跳新鲜）
+BOOL TRDaemonIsOnline(void);
+
+/// 守护没在跑就分离进程补起；已在跑直接返回 0，不重复 spawn
+int TREnsureDaemonDetached(void);
+
 /// 以 root 运行自身 --install-daemon 安装 launchd 常驻任务
 int TRInstallDaemonHard(void);
 

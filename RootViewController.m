@@ -32,7 +32,7 @@
 	CGFloat pad = 16.0;
 
 	self.titleLabel = [[UILabel alloc] initWithFrame:CGRectMake(pad, 48, w - pad * 2, 36)];
-	self.titleLabel.text = @"TrollReboot 3.3";
+	self.titleLabel.text = @"TrollReboot 3.4";
 	self.titleLabel.font = [UIFont boldSystemFontOfSize:28];
 	[self.view addSubview:self.titleLabel];
 
@@ -40,7 +40,7 @@
 	self.hintLabel.numberOfLines = 0;
 	self.hintLabel.font = [UIFont systemFontOfSize:11];
 	self.hintLabel.textColor = [UIColor secondaryLabelColor];
-	self.hintLabel.text = @"v3.3 沿用 TrollStore 持久化助手的机制，宿主是「Watch」（原件自动备份，GTA Tracker 完全不碰）。\n本版是诊断版：安装时会把 uid/euid、写权限探针、原始 errno 打进 launcher.log。\n锁屏触发：快捷指令「获取 URL 内容」访问 http://127.0.0.1:8899/reboot";
+	self.hintLabel.text = @"v3.4 打开 App 或点 Watch 图标，都会「没有就自动补起守护」，已在跑则跳过（不会再起多个）。\n装启动器仍只需点一次「②」（宿主 Watch，原件自动备份，GTA Tracker 完全不碰）。\n锁屏触发：快捷指令「获取 URL 内容」访问 http://127.0.0.1:8899/reboot";
 	[self.view addSubview:self.hintLabel];
 
 	self.daemonButton = [self makeButton:@"① 启用后台守护（当前开机周期内生效）" y:142 color:[UIColor systemBlueColor]];
@@ -99,8 +99,27 @@
 	[super viewDidAppear:animated];
 	[self refreshStatus];
 
-	// v3.1：不再自动装 launchd 作业（本机根卷只读，此路已证死），
-	// 也不再把「现在拉起守护」当兜底（用户明确否决）。开机自启改由 ② 启动器负责。
+	// v3.4（用户 2026-11-08 批准 ③）：打开 App 时若守护没在跑，静默补起一次。
+	// 不在页面上弹窗、不打断，只写一行日志；已在跑则完全不动作。
+	dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
+		BOOL wasOnline = TRDaemonIsOnline();
+		int rc = 0;
+		if (!wasOnline)
+		{
+			rc = TREnsureDaemonDetached();
+		sleep(2);
+		}
+		BOOL online = TRDaemonIsOnline();
+		dispatch_async(dispatch_get_main_queue(), ^{
+			[self refreshStatus];
+			if (wasOnline)
+				[self appendLog:@"守护已在跑（无需拉起）"];
+			else if (online)
+				[self appendLog:@"打开 App 时守护不在跑，已自动补起"];
+			else
+				[self appendLog:[NSString stringWithFormat:@"自动补起没成功 rc=%d，看 daemon.log", rc]];
+		});
+	});
 
 	if (self.pendingURL)
 	{
@@ -113,7 +132,7 @@
 - (void)refreshStatus
 {
 	NSMutableString *m = [NSMutableString string];
-	[m appendFormat:@"build = TrollReboot 3.3\n"];
+	[m appendFormat:@"build = TrollReboot 3.4\n"];
 	[m appendFormat:@"app uid=%u euid=%u\n", getuid(), geteuid()];
 
 	[m appendString:@"\n"];
