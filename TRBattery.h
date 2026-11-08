@@ -26,8 +26,13 @@ BOOL TRBatteryLooksStuck(NSDictionary *sample, int currentThresholdMA);
 /// 把一次采样按「监控预览」逐条判读，返回一行文本（只判断，不执行任何动作）。
 NSString *TRMonitorVerdict(NSDictionary *sample);
 
+/// 公开 API 读电源信息（IOPSCopyPowerSourcesInfo，不碰私有注册表，几乎不会崩）。
+/// 返回：ok / plugged(BOOL) / charging(BOOL) / fullyCharged(BOOL) / percent / maxCapacity / source=@"public"
+NSDictionary *TRPowerSourcesRead(void);
+
 /// 探针日志路径（App Documents/charge-probe.log）
 NSString *TRProbeLogPath(void);
 
 /// 追加一行到探针日志（带时间戳，立即 fsync）。
 void TRProbeLogAppend(NSString *line);
+

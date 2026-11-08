@@ -399,3 +399,116 @@ NSString *TRBatteryLine(NSDictionary *s)
 	                                  stuck,
 	                                  verdict];
 }
+
+
+#pragma mark - 公开 API 电源信息（不依赖私有注册表）
+
+/*
+ * IOPSCopyPowerSourcesInfo / IOPSCopyPowerSourcesList / IOPSGetPowerSourceDescription
+ * 都是 IOKit 里的公开符号（不需要头文件，dlsym 即可），只返回「电源描述」，
+ * 不触碰 AppleSmartBattery 这类私有服务节点，因此在 App/守护里调用都不会崩。
+ *
+ * 它给不了电流/电压/温度，但能稳定给出：
+ *   - 是否插着外部电源（Battery Power = No）
+ *   - 是否在充（Is Charging）
+ *   - 电量百分比（Current Capacity / Max Capacity）
+ */
+NSDictionary *TRPowerSourcesRead(void)
+{
+	static void *psHandle = NULL;
+	static void *(*fnCopyInfo)(void) = NULL;
+	static CFArrayRef (*fnCopyList)(CFTypeRef) = NULL;
+	static CFDictionaryRef (*fnGetDesc)(CFTypeRef, CFTypeRef) = NULL;
+	static BOOL loaded = NO;
+
+	if (!loaded)
+	{
+		loaded = YES;
+		const char *paths[] = {
+			"/System/Library/PrivateFrameworks/IOKit.framework/IOKit",
+			"/System/Library/Frameworks/IOKit.framework/IOKit",
+			"IOKit",
+		};
+		for (size_t i = 0; i < sizeof(paths) / sizeof(paths[0]) && psHandle == NULL; i++)
+			psHandle = dlopen(paths[i], RTLD_NOW);
+
+		if (psHandle)
+		{
+			fnCopyInfo = (void *(*)(void))dlsym(psHandle, "IOPSCopyPowerSourcesInfo");
+			fnCopyList = (CFArrayRef (*)(CFTypeRef))dlsym(psHandle, "IOPSCopyPowerSourcesList");
+			fnGetDesc = (CFDictionaryRef (*)(CFTypeRef, CFTypeRef))dlsym(psHandle, "IOPSGetPowerSourceDescription");
+		}
+	}
+
+	NSMutableDictionary *out = [NSMutableDictionary dictionary];
+	out[@"ok"] = @NO;
+	out[@"source"] = @"public";
+
+	if (!fnCopyInfo || !fnCopyList || !fnGetDesc)
+	{
+		out[@"error"] = @"公开电源 API 不可用（dlsym 失败）";
+		return out;
+	}
+
+	CFTypeRef info = fnCopyInfo();
+	if (info == NULL)
+	{
+		out[@"error"] = @"IOPSCopyPowerSourcesInfo 返回空";
+		return out;
+	}
+
+	CFArrayRef list = fnCopyList(info);
+	if (list == NULL)
+	{
+		CFRelease(info);
+		out[@"error"] = @"IOPSCopyPowerSourcesList 返回空";
+		return out;
+	}
+
+	NSDictionary *picked = nil;
+	for (CFIndex i = 0; i < CFArrayGetCount(list); i++)
+	{
+		CFTypeRef ps = (CFTypeRef)CFArrayGetValueAtIndex(list, i);
+		CFDictionaryRef desc = fnGetDesc(info, ps);
+		if (desc == NULL)
+			continue;
+		NSDictionary *d = (__bridge NSDictionary *)desc;
+		NSString *type = d[@"Type"];
+		if ([type isKindOfClass:[NSString class]] && [type isEqualToString:@"InternalBattery"])
+		{
+			picked = d;
+			break;
+		}
+		if (picked == nil)
+			picked = d;
+	}
+	CFRelease(list);
+	CFRelease(info);
+
+	if (picked == nil)
+	{
+		out[@"error"] = @"没有内建电池的电源描述";
+		return out;
+	}
+
+	NSNumber *cur = picked[@"Current Capacity"];
+	NSNumber *max = picked[@"Max Capacity"];
+	NSNumber *charging = picked[@"Is Charging"];
+	NSNumber *batteryPower = picked[@"Battery Power"];
+
+	out[@"ok"] = @YES;
+	if ([cur isKindOfClass:[NSNumber class]])
+		out[@"percent"] = cur;
+	if ([max isKindOfClass:[NSNumber class]])
+		out[@"maxCapacity"] = max;
+	// Battery Power = NO 代表当前由外部电源供电（即插着充电器）
+	out[@"plugged"] = @(![batteryPower isKindOfClass:[NSNumber class]] ? YES : ![batteryPower boolValue]);
+	out[@"external"] = out[@"plugged"];
+	out[@"charging"] = @([charging isKindOfClass:[NSNumber class]] ? [charging boolValue] : NO);
+	out[@"fullyCharged"] = @([cur isKindOfClass:[NSNumber class]] && [max isKindOfClass:[NSNumber class]] &&
+	                         [max integerValue] > 0 && [cur integerValue] >= [max integerValue]);
+	if ([picked[@"Time to Full Charge"] isKindOfClass:[NSNumber class]])
+		out[@"timeToFull"] = picked[@"Time to Full Charge"];
+
+	return out;
+}

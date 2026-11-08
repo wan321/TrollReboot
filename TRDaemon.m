@@ -282,6 +282,8 @@ static NSString *TRBatteryReadIsolated(void)
 
 static double gMonStuckSec = 0;
 static double gMonGraceSec = 0;
+static double gMonFlatSec = 0;
+static NSInteger gMonFlatPct = -1;
 static NSString *gMonNote = @"未开始";
 static pthread_mutex_t gMonLock = PTHREAD_MUTEX_INITIALIZER;
 
@@ -312,6 +314,15 @@ static void *TRMonitorThread(void *arg)
 			NSInteger minutes = TRMonitorStuckMinutes();
 			double need = (double)minutes * 60.0;
 
+			// ① 先用公开 API 取「插电 / 电量 / 是否充满」——这条路径不碰私有注册表，不会崩
+			NSDictionary *pub = TRPowerSourcesRead();
+			BOOL pubOk = [pub[@"ok"] boolValue];
+			BOOL pubPlugged = [pub[@"plugged"] boolValue];
+			NSInteger pubPct = [pub[@"percent"] integerValue];
+			BOOL pubFull = [pub[@"fullyCharged"] boolValue];
+			BOOL pubCharging = [pub[@"charging"] boolValue];
+
+			// ② 再尽力取私有 IOKit（电流/电压/温度）；它崩了也不影响上面的判定
 			NSString *raw = TRBatteryReadIsolatedWithFormat(YES);
 			NSDictionary *sample = nil;
 			if (raw.length > 0)
@@ -322,27 +333,72 @@ static void *TRMonitorThread(void *arg)
 					sample = o;
 			}
 
-			if (sample == nil)
+			BOOL haveCurrent = [sample[@"currentMA"] isKindOfClass:[NSNumber class]];
+			BOOL powered = pubPlugged || [sample[@"external"] boolValue];
+
+			BOOL stuck = NO;
+			BOOL soft = NO;
+			NSString *reason = nil;
+			NSString *mode = haveCurrent ? @"电流判据" : @"电量停滞判据";
+
+			if (!pubOk && sample == nil)
 			{
+				// 两条路都读不到：保守清零
 				pthread_mutex_lock(&gMonLock);
 				gMonStuckSec = 0;
+				gMonGraceSec = 0;
+				gMonFlatSec = 0;
 				pthread_mutex_unlock(&gMonLock);
-				TRMonSetNote(@"读不到电池，本轮清零");
+				TRMonSetNote(@"读不到电池（公开 API 与 IOKit 都失败），本轮清零");
 				sleep(TRMON_SAMPLE_SEC);
 				continue;
 			}
 
-			BOOL soft = NO;
-			NSString *reason = nil;
-			BOOL stuck = TRMonitorSampleIsStuck(sample, &reason, &soft);
-			BOOL powered = [sample[@"external"] boolValue];
-
+			if (haveCurrent)
+			{
+				stuck = TRMonitorSampleIsStuck(sample, &reason, &soft);
+			}
+			else
+			{
+				// 电量停滞判据：插电 + 未满 + 电量连续 N 分钟纹丝不动
+				pthread_mutex_lock(&gMonLock);
+				if (!pubPlugged || pubFull || pubPct <= 0) {
+					gMonFlatSec = 0;
+					gMonFlatPct = -1;
+					pthread_mutex_unlock(&gMonLock);
+					reason = !pubPlugged ? @"未插外部电源" : (pubFull ? @"电量已满" : @"读不到电量");
+				} else if (gMonFlatPct != pubPct) {
+					gMonFlatPct = pubPct;
+					gMonFlatSec = 0;
+					pthread_mutex_unlock(&gMonLock);
+					reason = [NSString stringWithFormat:@"电量仍在变化（%ld%%）", (long)pubPct];
+				} else {
+					gMonFlatSec += TRMON_SAMPLE_SEC;
+					double flat = gMonFlatSec;
+					pthread_mutex_unlock(&gMonLock);
+					if (flat >= need)
+					{
+						stuck = YES;
+						// 电量停滞已达阈值：把累计量直接推到阈值，立刻进入触发判定（不必再等一轮）
+						pthread_mutex_lock(&gMonLock);
+						if (gMonStuckSec < need)
+							gMonStuckSec = need;
+						pthread_mutex_unlock(&gMonLock);
+					}
+					else
+						reason = [NSString stringWithFormat:@"电量 %ld%% 已停滞 %ld 秒 / 需 %ld 秒（无电流数据）",
+						                                    (long)pubPct, (long)flat, (long)need];
+				}
+				(void)pubCharging;
+			}
 			if (!powered)
 			{
 				// 拔电：立即清零（硬闸，宁漏报不误重启）
 				pthread_mutex_lock(&gMonLock);
 				gMonStuckSec = 0;
 				gMonGraceSec = 0;
+				gMonFlatSec = 0;
+				gMonFlatPct = -1;
 				pthread_mutex_unlock(&gMonLock);
 			}
 			else if (stuck)
@@ -375,6 +431,9 @@ static void *TRMonitorThread(void *arg)
 				gMonGraceSec = 0;
 				pthread_mutex_unlock(&gMonLock);
 			}
+
+			if (reason.length > 0 && !stuck)
+				TRMonSetNote([NSString stringWithFormat:@"[%@] %@", mode, reason]);
 
 			// 恢复正常充电 → 熔断计数归零（「连续」才熔断）
 			if (powered && !stuck && !soft)
@@ -593,7 +652,31 @@ static NSString *TRHandleRequest(NSString *path)
 	}
 	if ([path hasPrefix:@"/batteryjson"])
 	{
-		return TRBatteryReadIsolatedWithFormat(YES);
+		static NSString *lastGood = nil;
+		NSString *raw = TRBatteryReadIsolatedWithFormat(YES);
+		NSDictionary *j = nil;
+		if ([raw hasPrefix:@"{"])
+			j = [NSJSONSerialization JSONObjectWithData:[raw dataUsingEncoding:NSUTF8StringEncoding] options:0 error:NULL];
+
+		if ([j isKindOfClass:[NSDictionary class]] && [j[@"ok"] boolValue])
+		{
+			lastGood = raw;
+			return raw;
+		}
+
+		// IOKit 崩了：用公开电源 API 兜底，至少给电量/插电/充电，并附上上一次成功读到的电流（标注为旧值）
+		NSMutableDictionary *fallback = [NSMutableDictionary dictionary];
+		NSDictionary *pub = TRPowerSourcesRead();
+		for (NSString *k in pub)
+			fallback[k] = pub[k];
+		fallback[@"ok"] = @([pub[@"ok"] boolValue]);
+		fallback[@"degraded"] = @YES;
+		fallback[@"iokitError"] = [raw length] > 0 ? raw : @"空响应";
+		if (lastGood.length > 0)
+			fallback[@"lastGood"] = lastGood;
+
+		NSData *d = [NSJSONSerialization dataWithJSONObject:fallback options:0 error:NULL];
+		return d.length ? [[NSString alloc] initWithData:d encoding:NSUTF8StringEncoding] : @"{}";
 	}
 	if ([path hasPrefix:@"/battery"])
 	{
