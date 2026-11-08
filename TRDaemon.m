@@ -15,7 +15,9 @@
 #include <signal.h>
 #include <pthread.h>
 #include <time.h>
-#include <sys/reboot.h>
+
+// iOS SDK 里没有 sys/reboot.h，自己声明
+extern int reboot(int);
 
 #define TR_DAEMON_PORT   8899
 #define TR_DAEMON_LABEL  "com.wan.trollreboot.daemon"
