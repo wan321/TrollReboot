@@ -242,7 +242,6 @@ NSDictionary *TRBatteryRead(void)
 	NSString *linkErr = nil;
 	NSMutableDictionary *merged = TRReadViaLinked(&linkErr);
 	int created = (int)merged.count;
-	int tried = created;
 	if (merged == nil) merged = [NSMutableDictionary dictionary];
 
 	// ② 直连拿不到 → 退回 dlopen/dlsym（老路，保留兼容）
@@ -264,7 +263,6 @@ NSDictionary *TRBatteryRead(void)
 			CFMutableDictionaryRef props = NULL;
 			kern_return_t kr = gCreateCFProperties(service, &props, kCFAllocatorDefault, 0);
 			gObjectRelease(service);
-			tried++;
 			if (kr != KERN_SUCCESS || props == NULL) continue;
 			NSDictionary *d = CFBridgingRelease(props);
 			if ([d isKindOfClass:[NSDictionary class]]) { merged[@(TRServiceNames[i])] = d; created++; }

@@ -1,1 +1,29 @@
-failed to get run log: log not found
+Build TrollReboot TIPA	Build package	﻿2026-11-08T17:03:05.2425480Z ##[group]Run set -euo pipefail
+Build TrollReboot TIPA	Build package	2026-11-08T17:03:05.2425840Z ^[[36;1mset -euo pipefail^[[0m
+Build TrollReboot TIPA	Build package	2026-11-08T17:03:05.2426050Z ^[[36;1mmake clean || true^[[0m
+Build TrollReboot TIPA	Build package	2026-11-08T17:03:05.2426230Z ^[[36;1mset -o pipefail^[[0m
+Build TrollReboot TIPA	Build package	2026-11-08T17:03:05.2426600Z ^[[36;1mmake package FINALPACKAGE=1 PACKAGE_FORMAT=ipa 2>&1 | tee build.log^[[0m
+Build TrollReboot TIPA	Build package	2026-11-08T17:03:05.2427040Z ^[[36;1mls -la packages || true^[[0m
+Build TrollReboot TIPA	Build package	2026-11-08T17:03:05.2484240Z shell: /bin/bash -e {0}
+Build TrollReboot TIPA	Build package	2026-11-08T17:03:05.2485080Z env:
+Build TrollReboot TIPA	Build package	2026-11-08T17:03:05.2485780Z   THEOS: /Users/runner/work/TrollReboot/TrollReboot/theos
+Build TrollReboot TIPA	Build package	2026-11-08T17:03:05.2487090Z ##[endgroup]
+Build TrollReboot TIPA	Build package	2026-11-08T17:03:13.0797470Z ^[[0;36m==> ^[[1;39mCleaning…^[[m
+Build TrollReboot TIPA	Build package	2026-11-08T17:03:14.0112540Z ^[[0;36m==> ^[[1;36mNotice:^[[m Build may be slow as Theos isn’t using all available CPU cores on this computer. Consider upgrading GNU Make: https://theos.dev/docs/parallel-building
+Build TrollReboot TIPA	Build package	2026-11-08T17:03:14.1631990Z ^[[1;31m> ^[[1;3;39mMaking all for application TrollReboot…^[[m
+Build TrollReboot TIPA	Build package	2026-11-08T17:03:15.2808040Z ^[[0;35m==> ^[[1;39mCopying resource directories into the application wrapper…^[[m
+Build TrollReboot TIPA	Build package	2026-11-08T17:03:15.8622160Z ^[[0;32m==> ^[[1;39mCompiling main.m (arm64)…^[[m
+Build TrollReboot TIPA	Build package	2026-11-08T17:03:18.7440290Z ^[[0;32m==> ^[[1;39mCompiling AppDelegate.m (arm64)…^[[m
+Build TrollReboot TIPA	Build package	2026-11-08T17:03:18.8671370Z ^[[0;32m==> ^[[1;39mCompiling RootViewController.m (arm64)…^[[m
+Build TrollReboot TIPA	Build package	2026-11-08T17:03:19.0911000Z ^[[0;32m==> ^[[1;39mCompiling TRRootOps.m (arm64)…^[[m
+Build TrollReboot TIPA	Build package	2026-11-08T17:03:19.1718650Z ^[[0;32m==> ^[[1;39mCompiling TRDaemon.m (arm64)…^[[m
+Build TrollReboot TIPA	Build package	2026-11-08T17:03:19.3983590Z ^[[0;32m==> ^[[1;39mCompiling TRBattery.m (arm64)…^[[m
+Build TrollReboot TIPA	Build package	2026-11-08T17:03:19.4346470Z ^[[1mTRBattery.m:245:6: ^[[0m^[[0;1;31merror: ^[[0m^[[1mvariable 'tried' set but not used [-Werror,-Wunused-but-set-variable]^[[0m
+Build TrollReboot TIPA	Build package	2026-11-08T17:03:19.4347180Z   245 |         int tried = created;^[[0m
+Build TrollReboot TIPA	Build package	2026-11-08T17:03:19.4347480Z       | ^[[0;1;32m            ^
+Build TrollReboot TIPA	Build package	2026-11-08T17:03:19.4418750Z ^[[0m1 error generated.
+Build TrollReboot TIPA	Build package	2026-11-08T17:03:19.4439290Z make[3]: *** [/Users/runner/work/TrollReboot/TrollReboot/.theos/obj/arm64/TRBattery.m.049d3b5b.o] Error 1
+Build TrollReboot TIPA	Build package	2026-11-08T17:03:19.4441250Z make[2]: *** [/Users/runner/work/TrollReboot/TrollReboot/.theos/obj/arm64/TrollReboot.app/TrollReboot] Error 2
+Build TrollReboot TIPA	Build package	2026-11-08T17:03:19.4444870Z make[1]: *** [internal-application-all_] Error 2
+Build TrollReboot TIPA	Build package	2026-11-08T17:03:19.4449310Z make: *** [TrollReboot.all.application.variables] Error 2
+Build TrollReboot TIPA	Build package	2026-11-08T17:03:19.4471150Z ##[error]Process completed with exit code 2.
