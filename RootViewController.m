@@ -32,7 +32,7 @@
 	CGFloat pad = 16.0;
 
 	self.titleLabel = [[UILabel alloc] initWithFrame:CGRectMake(pad, 48, w - pad * 2, 36)];
-	self.titleLabel.text = @"TrollReboot 1.2";
+	self.titleLabel.text = @"TrollReboot 1.4";
 	self.titleLabel.font = [UIFont boldSystemFontOfSize:28];
 	[self.view addSubview:self.titleLabel];
 
@@ -40,18 +40,19 @@
 	self.hintLabel.numberOfLines = 0;
 	self.hintLabel.font = [UIFont systemFontOfSize:11];
 	self.hintLabel.textColor = [UIColor secondaryLabelColor];
-	self.hintLabel.text = @"① 现在生效　② 开机自启（写 launchd，重启后自动跑）\n锁屏触发用快捷指令「获取 URL 内容」访问 http://127.0.0.1:8899/reboot";
+	self.hintLabel.text = @"① 现在生效　② 开机自启（先软，只写 /Library；重启后没起来再点「写系统盘」）\n锁屏触发用快捷指令「获取 URL 内容」访问 http://127.0.0.1:8899/reboot";
 	[self.view addSubview:self.hintLabel];
 
 	self.daemonButton = [self makeButton:@"① 启用后台守护（立即生效）" y:132 color:[UIColor systemBlueColor]];
 	[self.daemonButton addTarget:self action:@selector(enableDaemonTapped) forControlEvents:UIControlEventTouchUpInside];
 
-	self.autostartButton = [self makeButton:@"② 设为开机自启（重启后生效）" y:184 color:[UIColor systemIndigoColor]];
+	self.autostartButton = [self makeButton:@"② 设为开机自启（先软安装，重启后试）" y:184 color:[UIColor systemIndigoColor]];
 	[self.autostartButton addTarget:self action:@selector(autostartTapped) forControlEvents:UIControlEventTouchUpInside];
 
 	[self makeSmallButton:@"移除自启" x:pad action:@selector(uninstallTapped)];
 	[self makeSmallButton:@"刷新" x:pad + 92 action:@selector(refreshTapped)];
 	[self makeSmallButton:@"复制状态" x:pad + 172 action:@selector(copyTapped)];
+	[self makeSmallButton:@"写系统盘" x:pad + 252 action:@selector(hardInstallTapped)];
 
 	self.rebootButton = [self makeButton:@"立即重启（Kernel Reboot）" y:274 color:[UIColor systemRedColor]];
 	[self.rebootButton addTarget:self action:@selector(rebootTapped) forControlEvents:UIControlEventTouchUpInside];
@@ -129,7 +130,7 @@
 - (void)refreshStatus
 {
 	NSMutableString *m = [NSMutableString string];
-	[m appendFormat:@"build = TrollReboot 1.2\n"];
+	[m appendFormat:@"build = TrollReboot 1.4\n"];
 	[m appendFormat:@"app uid=%u euid=%u\n", getuid(), geteuid()];
 
 	NSDictionary *st = TRDaemonStatus();
@@ -214,10 +215,10 @@
 		dispatch_async(dispatch_get_main_queue(), ^{
 			[self refreshStatus];
 			NSMutableString *msg = [NSMutableString string];
-			[msg appendFormat:@"安装返回 rc=%d，在线=%@\n", rc, online ? @"是" : @"否"];
-			if (rc == 0 && online) [msg appendString:@"✅ launchd 已接管：重启手机后会自动跑"];
-			else if (systemPlist) [msg appendString:@"⚠️ 已尝试写 /System plist，重启后看是否自动起来"];
-			else [msg appendString:@"❌ launchd 拒绝登记，请看下面 install.log 里 launchctl 的 err 行"];
+			[msg appendFormat:@"软安装 rc=%d，在线=%@\n", rc, online ? @"是" : @"否"];
+			if (rc == 0) [msg appendString:@"✅ 软安装完成：现在重启手机，重启后先别打开 App，直接看心跳/自动化是否生效；没起来再点「写系统盘」"];
+			else if (systemPlist) [msg appendString:@"⚠️ /System 里已有 plist，重启后看是否自动起来"];
+			else [msg appendString:@"❌ /Library 写入失败，请看下面 install.log"];
 			[self appendLog:msg];
 			self.busy = NO;
 			self.autostartButton.enabled = YES;
@@ -225,6 +226,28 @@
 	});
 }
 
+- (void)hardInstallTapped
+{
+	if (self.busy) return;
+	self.busy = YES;
+	[self appendLog:@"--- 强制写入系统盘（会尝试重挂根分区）---"];
+
+	dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+		int rc = TRInstallDaemonHardViaRoot();
+		sleep(2);
+		BOOL systemPlist = [TRDaemonStatus()[@"systemPlistExists"] boolValue];
+
+		dispatch_async(dispatch_get_main_queue(), ^{
+			[self refreshStatus];
+			NSString *msg;
+			if (rc == 0 && systemPlist) msg = @"✅ /System plist 已写入，重启手机后 launchd 会自己加载";
+			else if (systemPlist) msg = @"⚠️ plist 在，但安装返回非 0，看 install.log";
+			else msg = @"❌ 系统分区写不进去（只读且重挂失败），改走「打开 URL 自动化」";
+			[self appendLog:msg];
+			self.busy = NO;
+		});
+	});
+}
 - (void)uninstallTapped
 {
 	if (self.busy) return;

@@ -20,6 +20,11 @@ NSString *TRInstallLogTail(NSUInteger lines);
 int TRLaunchDaemonDetached(void);
 
 /// 以 root 运行自身 --install-daemon 安装 launchd 常驻任务
+int TRInstallDaemonHard(void);
+
+/// 以 root 运行自身 --install-daemon-hard（重挂根分区写 /System）
+int TRInstallDaemonHardViaRoot(void);
+
 int TRInstallDaemonViaRoot(void);
 
 /// 以 root 运行自身 --uninstall-daemon 卸载 launchd 常驻任务

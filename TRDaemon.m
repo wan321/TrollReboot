@@ -361,25 +361,12 @@ int TRInstallDaemon(void)
 		NSString *detail = nil;
 		NSString *log = nil;
 
-		// ---- 1) /Library/LaunchDaemons ----
+		// ---- 软安装：只写 /Library/LaunchDaemons，不碰系统分区 ----
 		BOOL wroteLib = TRWritePlist(plist, @TR_DAEMON_PLIST, &detail);
 		TRAppendLog(@"install.log", detail ?: @"");
 
-		// ---- 2) /System/Library/LaunchDaemons（boot 时 launchd 一定会扫这里）----
-		BOOL wroteSys = TRWritePlist(plist, @TR_SYSTEM_PLIST, &detail);
-		if (!wroteSys)
-		{
-			TRAppendLog(@"install.log", [NSString stringWithFormat:@"首次写 /System 失败：%@", detail ?: @""]);
-			TRAppendLog(@"install.log", @"---- 尝试把根分区挂回可写 ----");
-			TRAppendLog(@"install.log", TRRemountRoot());
-			wroteSys = TRWritePlist(plist, @TR_SYSTEM_PLIST, &detail);
-		}
-		TRAppendLog(@"install.log", detail ?: @"");
-
-		// ---- 3) 有 launchctl 就顺手登记（没有就跳过，不影响开机生效）----
 		int rc = -1;
-		int printRc = -1;
-		if (hasLaunchctl)
+		if (hasLaunchctl && wroteLib)
 		{
 			rc = TRRunCmd(@TR_LAUNCHCTL, @[@"bootstrap", @"system", @TR_DAEMON_PLIST], &log);
 			TRAppendLog(@"install.log", log);
@@ -388,35 +375,73 @@ int TRInstallDaemon(void)
 				rc = TRRunCmd(@TR_LAUNCHCTL, @[@"load", @"-w", @TR_DAEMON_PLIST], &log);
 				TRAppendLog(@"install.log", log);
 			}
-			if (rc != 0 && wroteSys)
-			{
-				rc = TRRunCmd(@TR_LAUNCHCTL, @[@"bootstrap", @"system", @TR_SYSTEM_PLIST], &log);
-				TRAppendLog(@"install.log", log);
-			}
-			printRc = TRRunCmd(@TR_LAUNCHCTL,
-				@[@"print", [NSString stringWithFormat:@"system/%s", TR_DAEMON_LABEL]], &log);
+		}
+		else if (!hasLaunchctl)
+		{
+			TRAppendLog(@"install.log", @"跳过 launchctl（本机没有）");
+		}
+
+		TRAppendLog(@"install.log", [NSString stringWithFormat:@"结果(软)：/Library=%@  launchctl rc=%d",
+			wroteLib ? @"OK" : @"失败", rc]);
+
+		if (wroteLib)
+			TRAppendLog(@"install.log", @"✅ 已做软安装：重启后看守护是否自己起来；没起来再点「写系统盘」");
+		else
+			TRAppendLog(@"install.log", @"❌ 连 /Library 都没写进去，请把上面报错发我");
+
+		return wroteLib ? 0 : 5;
+	}
+}
+
+int TRInstallDaemonHard(void)
+{
+	@autoreleasepool
+	{
+		TREnsureBaseDir();
+		TRAppendLog(@"install.log", @"========== hard install (/System) ==========");
+
+		if (geteuid() != 0)
+		{
+			TRAppendLog(@"install.log", @"NOT ROOT：必须以 root 运行 --install-daemon-hard");
+			return 2;
+		}
+
+		NSString *exe = [NSBundle mainBundle].executablePath;
+		if (exe.length == 0) return 3;
+
+		NSFileManager *fm = [NSFileManager defaultManager];
+		BOOL hasLaunchctl = [fm fileExistsAtPath:@TR_LAUNCHCTL];
+		NSString *plist = TRDaemonPlistText(exe);
+		NSString *detail = nil;
+		NSString *log = nil;
+
+		// ---- 硬安装：重挂根分区写入 /System/Library/LaunchDaemons ----
+		BOOL wroteSys = TRWritePlist(plist, @TR_SYSTEM_PLIST, &detail);
+		if (!wroteSys)
+		{
+			TRAppendLog(@"install.log", [NSString stringWithFormat:@"首次写 /System 失败：%@", detail ?: @""]);
+			TRAppendLog(@"install.log", @"---- 重挂根分区为可写 ----");
+			TRAppendLog(@"install.log", TRRemountRoot());
+			wroteSys = TRWritePlist(plist, @TR_SYSTEM_PLIST, &detail);
+		}
+		TRAppendLog(@"install.log", detail ?: @"");
+
+		int rc = -1;
+		if (hasLaunchctl && wroteSys)
+		{
+			rc = TRRunCmd(@TR_LAUNCHCTL, @[@"bootstrap", @"system", @TR_SYSTEM_PLIST], &log);
 			TRAppendLog(@"install.log", log);
 		}
+
+		TRAppendLog(@"install.log", [NSString stringWithFormat:@"结果(硬)：/System=%@  launchctl rc=%d",
+			wroteSys ? @"OK" : @"失败", rc]);
+
+		if (wroteSys)
+			TRAppendLog(@"install.log", @"✅ 已写入 /System/Library/LaunchDaemons —— 重启手机后 launchd 会自己加载它");
 		else
-		{
-			TRAppendLog(@"install.log", @"跳过 launchctl（不存在）");
-		}
+			TRAppendLog(@"install.log", @"❌ 系统分区写不进去（只读且重挂失败），只能走「打开 URL 自动化」");
 
-		// ---- 4) 结论 ----
-		TRAppendLog(@"install.log", [NSString stringWithFormat:
-			@"结果：/Library=%@  /System=%@  bootstrap rc=%d  print rc=%d",
-			wroteLib ? @"OK" : @"失败", wroteSys ? @"OK" : @"失败", rc, printRc]);
-
-		if (printRc == 0)
-			TRAppendLog(@"install.log", @"✅ launchd 已登记，立即生效");
-		else if (wroteSys)
-			TRAppendLog(@"install.log", @"✅ plist 已落到 /System/Library/LaunchDaemons —— 重启手机后 launchd 会自己加载它");
-		else if (wroteLib)
-			TRAppendLog(@"install.log", @"⚠️ 只写进了 /Library/LaunchDaemons，没有 launchctl 无法确认 launchd 会扫这里，重启后实测");
-		else
-			TRAppendLog(@"install.log", @"❌ 两个位置都没写进去（根分区只读且无法重挂）");
-
-		return (printRc == 0 || wroteSys || wroteLib) ? 0 : 5;
+		return wroteSys ? 0 : 6;
 	}
 }
 
@@ -507,6 +532,11 @@ int TRLaunchDaemonDetached(void)
 int TRInstallDaemonViaRoot(void)
 {
 	return TRSpawnSelf(@[@"--install-daemon"], NO);
+}
+
+int TRInstallDaemonHardViaRoot(void)
+{
+	return TRSpawnSelf(@[@"--install-daemon-hard"], NO);
 }
 
 int TRUninstallDaemonViaRoot(void)
