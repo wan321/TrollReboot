@@ -5,6 +5,7 @@
 #include <sys/wait.h>
 #include <sys/socket.h>
 #include <sys/sysctl.h>
+#include <sys/mount.h>
 #include <sys/stat.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
@@ -363,6 +364,28 @@ static NSString *TRInstallBinaryCopy(NSString **detail)
 		TR_DAEMON_BIN, [[fm attributesOfItemAtPath:@TR_DAEMON_BIN error:nil][NSFileSize] unsignedLongLongValue]];
 	return @TR_DAEMON_BIN;
 }
+/// 进程内直接 mount(2) 重挂根分区（不依赖 /sbin/mount，也不受它自己的沙箱限制）
+static NSString *TRRemountRootInProcess(void)
+{
+	struct statfs *mnts = NULL;
+	int n = getmntinfo(&mnts, MNT_NOWAIT);
+	if (n <= 0)
+		return [NSString stringWithFormat:@"getmntinfo 失败 errno=%d (%s)", errno, strerror(errno)];
+
+	for (int i = 0; i < n; i++)
+	{
+		if (strcmp(mnts[i].f_mntonname, "/") != 0) continue;
+		if (!(mnts[i].f_flags & MNT_RDONLY))
+			return @"根分区本来就是可写的";
+
+		struct statfs fs = mnts[i];
+		if (mount(mnts[i].f_fstypename, "/", MNT_UPDATE, &fs) == 0)
+			return @"mount(2) 重挂成功：/ 已可写";
+		return [NSString stringWithFormat:@"mount(2) 重挂失败 errno=%d (%s)  [根分区 %s, flags=0x%x]",
+			errno, strerror(errno), mnts[i].f_fstypename, mnts[i].f_flags];
+	}
+	return @"没找到挂载点 /";
+}
 /// 尝试把根文件系统挂回可写，返回日志
 static NSString *TRRemountRoot(void)
 {
@@ -475,14 +498,19 @@ int TRInstallDaemonHard(void)
 
 		NSString *plist = TRDaemonPlistText(bin);
 		NSString *detail = nil;
-		NSString *log = nil;
 
 		BOOL wroteSys = TRWritePlist(plist, @TR_SYSTEM_PLIST, &detail);
 		if (!wroteSys)
 		{
 			TRAppendLog(@"install.log", [NSString stringWithFormat:@"首次写 /System 失败：%@", detail ?: @""]);
 			TRAppendLog(@"install.log", @"---- 重挂根分区为可写 ----");
-			TRAppendLog(@"install.log", TRRemountRoot());
+			NSString *remount = TRRemountRootInProcess();
+			TRAppendLog(@"install.log", remount);
+			// 进程内 mount(2) 不行再退回外部命令
+			if (![remount hasPrefix:@"mount(2) 重挂成功"] && ![remount isEqualToString:@"根分区本来就是可写的"])
+			{
+				TRAppendLog(@"install.log", TRRemountRoot());
+			}
 			wroteSys = TRWritePlist(plist, @TR_SYSTEM_PLIST, &detail);
 		}
 		TRAppendLog(@"install.log", detail ?: @"");
