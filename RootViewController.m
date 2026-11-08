@@ -43,7 +43,7 @@
 	CGFloat pad = 16.0;
 
 	self.titleLabel = [[UILabel alloc] initWithFrame:CGRectMake(pad, 48, w - pad * 2, 36)];
-	self.titleLabel.text = @"TrollReboot 3.5-probe";
+	self.titleLabel.text = @"TrollReboot 3.5-probe2";
 	self.titleLabel.font = [UIFont boldSystemFontOfSize:28];
 	[self.view addSubview:self.titleLabel];
 
@@ -157,7 +157,7 @@
 - (void)refreshStatus
 {
 	NSMutableString *m = [NSMutableString string];
-	[m appendFormat:@"build = TrollReboot 3.5-probe\n"];
+	[m appendFormat:@"build = TrollReboot 3.5-probe2\n"];
 	[m appendFormat:@"app uid=%u euid=%u\n", getuid(), geteuid()];
 
 	[m appendString:@"\n"];
@@ -291,22 +291,57 @@
 		return;
 
 	self.probeTicks++;
-	NSDictionary *s = TRBatteryRead();
-	NSString *line = [NSString stringWithFormat:@"#%ld %@", (long)self.probeTicks, TRBatteryLine(s)];
+	NSInteger tick = self.probeTicks;
 
-	// 每秒都落盘（fsync），重启/崩溃也不丢采样
-	TRProbeLogAppend(line);
+	// v3.5-probe2：电池数据只在 root 守护进程里读（App 进程里直接碰私有 IOKit 会闪退），
+	// App 侧只通过 HTTP 向 127.0.0.1:8899/battery 取一行文本。
+	dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
+		NSString *body = TRDaemonRequest(@"/battery");
+		NSString *text = [[body ?: @"" stringByTrimmingCharactersInSet:
+		                  [NSCharacterSet whitespaceAndNewlineCharacterSet]] copy];
 
-	[self.probeLines addObject:line];
-	if (self.probeLines.count > 150)
-		[self.probeLines removeObjectAtIndex:0];
+		BOOL offline = (text.length == 0) || [text isEqualToString:@"(无响应)"] || [text hasPrefix:@"connect"];
+		BOOL stale = [text isEqualToString:@"unknown path"];
 
-	NSString *elapsed = [NSString stringWithFormat:@"探针中 · 已 %ld 秒 · 阈值|电流|<50mA · 日志 Documents/charge-probe.log",
-	                                                     (long)(time(NULL) - self.probeStart)];
-	NSString *body = [self.probeLines componentsJoinedByString:@"\n"];
-	// 首行放状态条，便于一眼看到在跑
-	self.probeView.text = [NSString stringWithFormat:@"%@\n%@", elapsed, body];
-	[self.probeView scrollRangeToVisible:NSMakeRange(self.probeView.text.length, 0)];
+		if (stale || offline)
+		{
+			// 端口被旧版守护占着（旧代码没有 /battery），或者守护根本没在跑：杀掉旧实例起新的，再试一次
+			TRRestartDaemonDetached();
+			sleep(2);
+			NSString *retry = TRDaemonRequest(@"/battery");
+			text = [[retry ?: @"" stringByTrimmingCharactersInSet:
+			         [NSCharacterSet whitespaceAndNewlineCharacterSet]] copy];
+			stale = [text isEqualToString:@"unknown path"];
+			offline = (text.length == 0) || [text isEqualToString:@"(无响应)"] || [text hasPrefix:@"connect"];
+		}
+
+		NSString *line;
+		if (offline)
+			line = [NSString stringWithFormat:@"#%ld ❌ 守护没响应（先点「① 启用后台守护」，或看 daemon.log）", (long)tick];
+		else if (stale)
+			line = [NSString stringWithFormat:@"#%ld ❌ 旧版守护没有 /battery，已尝试重启守护，请再点一次「充电探针」", (long)tick];
+		else
+			line = [NSString stringWithFormat:@"#%ld %@", (long)tick, text];
+
+		// 每秒都落盘（fsync），重启/崩溃也不丢采样
+		TRProbeLogAppend(line);
+
+		dispatch_async(dispatch_get_main_queue(), ^{
+			if (!self.probing)
+				return;
+			[self.probeLines addObject:line];
+			if (self.probeLines.count > 150)
+				[self.probeLines removeObjectAtIndex:0];
+
+			NSString *elapsed = [NSString stringWithFormat:
+				@"探针中 · 已 %ld 秒 · 数据来自 root 守护 /battery · 日志 Documents/charge-probe.log",
+				(long)(time(NULL) - self.probeStart)];
+			NSString *bodyText = [self.probeLines componentsJoinedByString:@"\n"];
+			self.probeView.text = [NSString stringWithFormat:@"%@\n%@", elapsed, bodyText];
+			[self.probeView scrollRangeToVisible:NSMakeRange(self.probeView.text.length, 0)];
+		});
+	});
+}
 }
 
 - (void)enableDaemonTapped

@@ -3,6 +3,9 @@
 /// 后台守护模式入口（launchd 或 root 分离进程启动，参数 --daemon）
 int TRRunDaemon(void);
 
+/// v3.6：杀掉旧版守护后重起（参数 --daemon-restart）
+int TRRunDaemonRestart(void);
+
 /// 安装模式入口（必须以 root 运行，参数 --install-daemon）
 int TRInstallDaemon(void);
 
@@ -22,6 +25,9 @@ void TRAppendInstallLog(NSString *text);
 NSString *TRDaemonRequest(NSString *path);
 
 int TRLaunchDaemonDetached(void);
+
+/// v3.6：杀掉旧版守护并用新代码重起（参数 --daemon-restart）
+int TRRestartDaemonDetached(void);
 
 /// 守护是否在线（心跳新鲜）
 BOOL TRDaemonIsOnline(void);

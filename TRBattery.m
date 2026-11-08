@@ -35,11 +35,13 @@ typedef kern_return_t (*FnIORegistryEntryCreateCFProperties)(io_registry_entry_t
                                                             CFAllocatorRef allocator,
                                                             IOOptionBits options);
 typedef kern_return_t (*FnIOObjectRelease)(io_object_t object);
+typedef kern_return_t (*FnIOMasterPort)(mach_port_t bootstrapPort, mach_port_t *masterPort);
 
 static FnIOServiceGetMatchingService gGetMatchingService = NULL;
 static FnIOServiceMatching gServiceMatching = NULL;
 static FnIORegistryEntryCreateCFProperties gCreateCFProperties = NULL;
 static FnIOObjectRelease gObjectRelease = NULL;
+static FnIOMasterPort gMasterPort = NULL;
 static char gIOKitError[256] = {0};
 
 static BOOL TRLoadIOKit(void)
@@ -77,6 +79,7 @@ static BOOL TRLoadIOKit(void)
 	gServiceMatching = (FnIOServiceMatching)dlsym(handle, "IOServiceMatching");
 	gCreateCFProperties = (FnIORegistryEntryCreateCFProperties)dlsym(handle, "IORegistryEntryCreateCFProperties");
 	gObjectRelease = (FnIOObjectRelease)dlsym(handle, "IOObjectRelease");
+	gMasterPort = (FnIOMasterPort)dlsym(handle, "IOMasterPort");
 
 	if (!gGetMatchingService || !gServiceMatching || !gCreateCFProperties || !gObjectRelease)
 	{
@@ -144,47 +147,82 @@ NSDictionary *TRBatteryRead(void)
 		return out;
 	}
 
-	CFMutableDictionaryRef matching = gServiceMatching("AppleSmartBattery");
-	if (matching == NULL)
+	// 参照 EEIOKitListener：先 IOMasterPort 拿 master port。
+	// 之前直接给 IOServiceGetMatchingService 传 0，在部分 iOS 上拿不到服务甚至直接把进程带走。
+	mach_port_t masterPort = MACH_PORT_NULL;
+	if (gMasterPort)
 	{
-		out[@"error"] = @"IOServiceMatching(AppleSmartBattery) -> NULL";
+		kern_return_t mkr = gMasterPort(MACH_PORT_NULL, &masterPort);
+		if (mkr != KERN_SUCCESS)
+		{
+			snprintf(gIOKitError, sizeof(gIOKitError), "IOMasterPort kr=%d", (int)mkr);
+			masterPort = MACH_PORT_NULL;
+		}
+	}
+
+	// AppleSmartBattery：容量 / 电流 / 电压 / 温度
+	// AppleARMPMUCharger：充电器侧数据（EEIOKitListener 用的就是它）
+	const char *serviceNames[] = { "AppleSmartBattery", "AppleARMPMUCharger" };
+	NSMutableDictionary *merged = [NSMutableDictionary dictionary];
+	int tried = 0;
+	int created = 0;
+
+	for (size_t i = 0; i < sizeof(serviceNames) / sizeof(serviceNames[0]); i++)
+	{
+		CFMutableDictionaryRef matching = gServiceMatching(serviceNames[i]);
+		if (matching == NULL)
+			continue;
+
+		io_service_t service = gGetMatchingService(masterPort, matching);
+		CFRelease(matching);
+		if (service == 0)
+			continue;
+
+		CFMutableDictionaryRef props = NULL;
+		kern_return_t kr = gCreateCFProperties(service, &props, kCFAllocatorDefault, 0);
+		gObjectRelease(service);
+		tried++;
+		if (kr != KERN_SUCCESS || props == NULL)
+			continue;
+
+		NSDictionary *d = CFBridgingRelease(props);
+		if ([d isKindOfClass:[NSDictionary class]])
+		{
+			merged[@(serviceNames[i])] = d;
+			created++;
+		}
+	}
+
+	if (created == 0)
+	{
+		out[@"error"] = [NSString stringWithFormat:@"两个服务都读不到（tried=%d master_port=%u）%@",
+		                                           tried, (unsigned)masterPort,
+		                                           gIOKitError[0] ? @(gIOKitError) : @""];
 		return out;
 	}
 
-	io_service_t service = gGetMatchingService(0, matching);
-	CFRelease(matching);
-	if (service == 0)
-	{
-		out[@"error"] = @"AppleSmartBattery 服务不存在（读不到电池）";
-		return out;
-	}
-
-	CFMutableDictionaryRef props = NULL;
-	kern_return_t kr = gCreateCFProperties(service, &props, kCFAllocatorDefault, 0);
-	gObjectRelease(service);
-
-	if (kr != KERN_SUCCESS || props == NULL)
-	{
-		out[@"error"] = [NSString stringWithFormat:@"IORegistryEntryCreateCFProperties kr=%d", (int)kr];
-		return out;
-	}
-
-	NSDictionary *p = CFBridgingRelease(props);
+	NSDictionary *p = merged[@"AppleSmartBattery"] ?: merged[@"AppleARMPMUCharger"];
+	NSDictionary *alt = merged[@"AppleARMPMUCharger"] ?: merged[@"AppleSmartBattery"];
 
 	out[@"ok"] = @YES;
 	out[@"properties"] = p;
+	out[@"services"] = [merged.allKeys componentsJoinedByString:@","];
 
+	// 电流：两个服务里谁有就用谁（charger 的 Amperage 在快充时更贴近实际）
 	NSNumber *instant = TRNum(p[@"InstantAmperage"]);
-	if (instant == nil)
-		instant = TRNum(p[@"Amperage"]);
+	if (instant == nil) instant = TRNum(alt[@"InstantAmperage"]);
+	if (instant == nil) instant = TRNum(p[@"Amperage"]);
+	if (instant == nil) instant = TRNum(alt[@"Amperage"]);
 	if (instant)
 		out[@"currentMA"] = instant;
 
 	NSNumber *voltage = TRNum(p[@"Voltage"]);
+	if (voltage == nil) voltage = TRNum(alt[@"Voltage"]);
 	if (voltage)
 		out[@"voltageMV"] = voltage;
 
 	NSNumber *temp = TRNum(p[@"Temperature"]);
+	if (temp == nil) temp = TRNum(alt[@"Temperature"]);
 	if (temp)
 		out[@"temperatureDeciC"] = temp;
 

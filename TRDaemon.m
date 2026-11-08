@@ -1,5 +1,6 @@
 #import "TRDaemon.h"
 #import "TRRootOps.h"
+#import "TRBattery.h"
 
 #include <spawn.h>
 #include <sys/wait.h>
@@ -215,11 +216,47 @@ static NSString *TRHandleRequest(NSString *path)
 		int rc = TRInstallDaemon();
 		return [NSString stringWithFormat:@"install rc=%d euid=%u", rc, geteuid()];
 	}
+	if ([path hasPrefix:@"/battery"])
+	{
+		// v3.6：电池/电流读取只在 root 守护进程里做（App 进程里读 IOKit 会闪退）
+		NSDictionary *s = TRBatteryRead();
+		NSString *line = TRBatteryLine(s);
+		TRAppendLog(@"daemon.log", line);
+		return line;
+	}
 	if ([path hasPrefix:@"/ping"] || [path isEqualToString:@"/"])
 	{
 		return [NSString stringWithFormat:@"ok uid=%u pid=%d", getuid(), getpid()];
 	}
 	return @"unknown path";
+}
+
+/// v3.6：端口被旧版守护占着（进程里跑的是旧代码，没有 /battery）时，
+/// 按心跳文件里的 pid 把它杀掉——我们是 root，直接 SIGKILL。
+static int TRKillStaleDaemon(void)
+{
+	NSString *hb = [NSString stringWithContentsOfFile:TRPath(@"heartbeat")
+	                                         encoding:NSUTF8StringEncoding
+	                                            error:nil];
+	if (hb.length == 0)
+		return -1;
+
+	NSRange r = [hb rangeOfString:@"pid="];
+	if (r.location == NSNotFound)
+		return -1;
+
+	NSString *rest = [hb substringFromIndex:NSMaxRange(r)];
+	NSCharacterSet *nonDigits = [[NSCharacterSet decimalDigitCharacterSet] invertedSet];
+	NSRange stop = [rest rangeOfCharacterFromSet:nonDigits];
+	NSString *pidStr = (stop.location == NSNotFound) ? rest : [rest substringToIndex:stop.location];
+
+	int pid = pidStr.intValue;
+	if (pid <= 0 || pid == getpid())
+		return -1;
+
+	kill(pid, SIGKILL);
+	TRAppendLog(@"daemon.log", [NSString stringWithFormat:@"已杀掉旧守护实例 pid=%d（版本升级接管）", pid]);
+	return pid;
 }
 
 int TRRunDaemon(void)
@@ -251,10 +288,29 @@ int TRRunDaemon(void)
 
 		if (bind(sfd, (struct sockaddr *)&addr, sizeof(addr)) < 0)
 		{
-			TRAppendLog(@"daemon.log", [NSString stringWithFormat:@"bind %d failed errno=%d（已有实例在跑）",
-				TR_DAEMON_PORT, errno]);
-			close(sfd);
-			return 2;
+			int bindErr = errno;
+			TRAppendLog(@"daemon.log", [NSString stringWithFormat:@"bind %d failed errno=%d（端口被占）",
+				TR_DAEMON_PORT, bindErr]);
+
+			if (bindErr == EADDRINUSE && TRKillStaleDaemon() > 0)
+			{
+				sleep(1);
+				if (bind(sfd, (struct sockaddr *)&addr, sizeof(addr)) == 0)
+				{
+					TRAppendLog(@"daemon.log", @"接管成功（旧实例已退出）");
+				}
+				else
+				{
+					TRAppendLog(@"daemon.log", [NSString stringWithFormat:@"接管失败 errno=%d", errno]);
+					close(sfd);
+					return 2;
+				}
+			}
+			else
+			{
+				close(sfd);
+				return 2;
+			}
 		}
 		if (listen(sfd, 8) < 0)
 		{
@@ -287,6 +343,15 @@ int TRRunDaemon(void)
 		}
 	}
 	return 0;
+}
+
+/// v3.6：先杀掉旧版守护再重新起（App 发现 /battery 返回 unknown path 时调用），
+/// 避免「端口被旧进程占着 → 新代码永远拿不到端口」的死结。
+int TRRunDaemonRestart(void)
+{
+	TRKillStaleDaemon();
+	sleep(1);
+	return TRRunDaemon();
 }
 
 #pragma mark - plist 生成
@@ -744,6 +809,12 @@ NSString *TRDaemonRequest(NSString *path)
 int TRLaunchDaemonDetached(void)
 {
 	return TRSpawnSelf(@[@"--daemon"], YES);
+}
+
+/// v3.6：杀掉旧版守护并用新代码重起（端口被旧进程占着时的自救）
+int TRRestartDaemonDetached(void)
+{
+	return TRSpawnSelf(@["--daemon-restart"], YES);
 }
 
 int TRInstallDaemonViaRoot(void)

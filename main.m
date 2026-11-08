@@ -11,6 +11,10 @@ int main(int argc, char *argv[])
 	{
 		return TRRunDaemon();
 	}
+	if (argc > 1 && strcmp(argv[1], "--daemon-restart") == 0)
+	{
+		return TRRunDaemonRestart();
+	}
 	if (argc > 1 && strcmp(argv[1], "--install-daemon-hard") == 0)
 	{
 		return TRInstallDaemonHard();
