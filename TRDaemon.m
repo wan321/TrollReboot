@@ -178,6 +178,82 @@ static void TRRespond(int fd, int code, NSString *body)
 	}
 }
 
+/// v3.5-probe3：把私有 IOKit 读电池放进 fork 出来的子进程里做。
+/// 这样即使 IOKit 把进程搞崩，死的也只是子进程，守护还活着，而且能报出信号号。
+static NSString *TRBatteryReadIsolated(void)
+{
+	int fds[2];
+	if (pipe(fds) != 0)
+		return [NSString stringWithFormat:@"❌ pipe errno=%d", errno];
+
+	pid_t child = fork();
+	if (child == 0)
+	{
+		close(fds[0]);
+		@autoreleasepool
+		{
+			NSString *line = TRBatteryLine(TRBatteryRead());
+			NSData *d = [line dataUsingEncoding:NSUTF8StringEncoding];
+			if (d.length > 0)
+				(void)write(fds[1], d.bytes, d.length);
+		}
+		_exit(0);
+	}
+	close(fds[1]);
+	if (child < 0)
+	{
+		close(fds[0]);
+		return [NSString stringWithFormat:@"❌ fork errno=%d", errno];
+	}
+
+	int fl = fcntl(fds[0], F_GETFL, 0);
+	(void)fcntl(fds[0], F_SETFL, fl | O_NONBLOCK);
+
+	NSMutableData *acc = [NSMutableData data];
+	char buf[1024];
+	BOOL timedOut = NO;
+	NSTimeInterval deadline = [NSDate timeIntervalSinceReferenceDate] + 3.0;
+	for (;;)
+	{
+		ssize_t n = read(fds[0], buf, sizeof(buf));
+		if (n > 0)
+		{
+			[acc appendBytes:buf length:(NSUInteger)n];
+			continue;
+		}
+		if (n == 0)
+			break;
+		if (errno != EAGAIN && errno != EWOULDBLOCK)
+			break;
+		if ([NSDate timeIntervalSinceReferenceDate] > deadline)
+		{
+			timedOut = YES;
+			break;
+		}
+		usleep(20000);
+	}
+	close(fds[0]);
+
+	int status = 0;
+	pid_t w = waitpid(child, &status, WNOHANG);
+	if (w == 0)
+	{
+		kill(child, SIGKILL);
+		(void)waitpid(child, &status, 0);
+	}
+
+	if (acc.length > 0)
+	{
+		NSString *s = [[NSString alloc] initWithData:acc encoding:NSUTF8StringEncoding];
+		return s.length > 0 ? s : @"❌ 读电池返回空";
+	}
+	if (timedOut)
+		return @"❌ 读电池超时（>3s，私有 IOKit 卡住）";
+	if (WIFSIGNALED(status))
+		return [NSString stringWithFormat:@"❌ 读电池的子进程被信号 %d 杀掉（私有 IOKit 崩了）", WTERMSIG(status)];
+	return [NSString stringWithFormat:@"❌ 读电池无输出（子进程 exit=%d）", WEXITSTATUS(status)];
+}
+
 static NSString *TRHandleRequest(NSString *path)
 {
 	TRAppendLog(@"daemon.log", [NSString stringWithFormat:@"request path=%@", path]);
@@ -218,9 +294,7 @@ static NSString *TRHandleRequest(NSString *path)
 	}
 	if ([path hasPrefix:@"/battery"])
 	{
-		// v3.6：电池/电流读取只在 root 守护进程里做（App 进程里读 IOKit 会闪退）
-		NSDictionary *s = TRBatteryRead();
-		NSString *line = TRBatteryLine(s);
+		NSString *line = TRBatteryReadIsolated();
 		TRAppendLog(@"daemon.log", line);
 		return line;
 	}
