@@ -57,6 +57,65 @@ jobs:
           path: build.log
           if-no-files-found: ignore
 
+      - name: Resign with ldid (explicit)
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          PACKAGE=$(find packages -maxdepth 1 \( -name '*.tipa' -o -name '*.ipa' \) -print | head -n 1 || true)
+          if [ -z "${PACKAGE:-}" ]; then
+            echo "ERROR: no package produced"
+            ls -la packages || true
+            exit 1
+          fi
+          PACKAGE_ABS="$(cd "$(dirname "$PACKAGE")" && pwd)/$(basename "$PACKAGE")"
+          echo "Package: $PACKAGE_ABS"
+
+          TMP=$(mktemp -d)
+          unzip -q "$PACKAGE_ABS" -d "$TMP"
+          APP=$(find "$TMP/Payload" -maxdepth 1 -name '*.app' | head -n 1)
+          test -n "$APP"
+          BIN="$APP/TrollReboot"
+          test -f "$BIN"
+
+          echo "========== 签名前 =========="
+          ldid -e "$BIN" > /tmp/ent-before.plist 2>/dev/null || echo "(签名前没有 entitlements)"
+          head -c 400 /tmp/ent-before.plist || true
+          echo
+          ls -l "$BIN"
+          shasum -a 256 "$BIN"
+
+          echo "========== 显式用 ldid 签名 =========="
+          echo "命令: ldid -S\"$GITHUB_WORKSPACE/entitlements.plist\" \"$BIN\""
+          set -x
+          ldid -S"$GITHUB_WORKSPACE/entitlements.plist" "$BIN"
+          set +x
+
+          echo "========== 签名后 =========="
+          ldid -e "$BIN" | tee /tmp/ent-after.plist
+          ls -l "$BIN"
+          shasum -a 256 "$BIN"
+
+          # 逐条校验：entitlements.plist 里声明的每个 key 都必须出现在签名结果里
+          echo "========== 逐条校验 entitlements =========="
+          KEYS=$(grep -o '<key>[^<]*</key>' "$GITHUB_WORKSPACE/entitlements.plist" | sed -e 's|<key>||' -e 's|</key>||')
+          echo "$KEYS"
+          for k in $KEYS; do
+            if grep -q "<key>$k</key>" /tmp/ent-after.plist; then
+              echo "OK   $k"
+            else
+              echo "ERROR: 签名后丢失 $k"
+              exit 1
+            fi
+          done
+
+          # 重新打包成 ipa/tipa（保持 Payload 结构）
+          rm -f "$PACKAGE_ABS"
+          ( cd "$TMP" && zip -qry "$PACKAGE_ABS" Payload )
+          unzip -t "$PACKAGE_ABS"
+          ls -l "$PACKAGE_ABS"
+          echo "OK: 已用 ldid 显式重新签名并重新打包"
+
       - name: Verify package
         shell: bash
         run: |
