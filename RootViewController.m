@@ -32,7 +32,7 @@
 	CGFloat pad = 16.0;
 
 	self.titleLabel = [[UILabel alloc] initWithFrame:CGRectMake(pad, 48, w - pad * 2, 36)];
-	self.titleLabel.text = @"TrollReboot 1.7";
+	self.titleLabel.text = @"TrollReboot 1.8";
 	self.titleLabel.font = [UIFont boldSystemFontOfSize:28];
 	[self.view addSubview:self.titleLabel];
 
@@ -103,7 +103,7 @@
 	// 不把守护进程「现在拉起来」当兜底；但把 launchd 作业装好是一次性动作：
 	// 没装过就静默装一遍，之后每次开机/解锁由系统自己拉起，无需打开 App、无需点按钮。
 	NSDictionary *st = TRDaemonStatus();
-	if (![st[@"plistExists"] boolValue] && ![st[@"systemPlistExists"] boolValue])
+	if (![st[@"systemPlistExists"] boolValue] || ![st[@"binExists"] boolValue])
 	{
 		if (!self.didAutoStart)
 		{
@@ -117,7 +117,7 @@
 				dispatch_async(dispatch_get_main_queue(), ^{
 					[self refreshStatus];
 					[self appendLog:[NSString stringWithFormat:
-						@"已静默安装开机自启作业 rc=%d（之后开机/解锁由系统拉起，不用再点按钮）", rc]];
+						@"已静默装好开机自启 rc=%d（launchctl 不可用时会自动写到 /System，重启后生效）", rc]];
 				});
 			});
 		}
@@ -135,7 +135,7 @@
 - (void)refreshStatus
 {
 	NSMutableString *m = [NSMutableString string];
-	[m appendFormat:@"build = TrollReboot 1.7\n"];
+	[m appendFormat:@"build = TrollReboot 1.8\n"];
 	[m appendFormat:@"app uid=%u euid=%u\n", getuid(), geteuid()];
 
 	NSDictionary *st = TRDaemonStatus();
@@ -148,6 +148,7 @@
 	[m appendFormat:@"plist  /Library=%@  /System=%@\n",
 		[st[@"plistExists"] boolValue] ? @"在" : @"无",
 		[st[@"systemPlistExists"] boolValue] ? @"在" : @"无"];
+	[m appendFormat:@"守护二进制 /usr/libexec=%@\n", [st[@"binExists"] boolValue] ? @"在" : @"无"];
 	[m appendFormat:@"端点 http://127.0.0.1:8899/reboot\n"];
 
 	NSArray *candidates = TRHelperCandidates();
