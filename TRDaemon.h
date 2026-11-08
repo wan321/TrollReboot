@@ -17,6 +17,10 @@ NSString *TRDaemonLogTail(NSUInteger lines);
 NSString *TRInstallLogTail(NSUInteger lines);
 
 /// 以 root 分离进程方式拉起自身 --daemon（失败返回 errno）
+void TRAppendInstallLog(NSString *text);
+
+NSString *TRDaemonRequest(NSString *path);
+
 int TRLaunchDaemonDetached(void);
 
 /// 以 root 运行自身 --install-daemon 安装 launchd 常驻任务

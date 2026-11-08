@@ -193,6 +193,16 @@ static NSString *TRHandleRequest(NSString *path)
 		TRKillSpringBoard();
 		return @"respring sent";
 	}
+	if ([path hasPrefix:@"/install-hard"])
+	{
+		int rc = TRInstallDaemonHard();
+		return [NSString stringWithFormat:@"install-hard rc=%d euid=%u", rc, geteuid()];
+	}
+	if ([path hasPrefix:@"/install"])
+	{
+		int rc = TRInstallDaemon();
+		return [NSString stringWithFormat:@"install rc=%d euid=%u", rc, geteuid()];
+	}
 	if ([path hasPrefix:@"/ping"] || [path isEqualToString:@"/"])
 	{
 		return [NSString stringWithFormat:@"ok uid=%u pid=%d", getuid(), getpid()];
@@ -524,6 +534,44 @@ static int TRSpawnSelf(NSArray<NSString *> *args, BOOL detached)
 	return rc;
 }
 
+void TRAppendInstallLog(NSString *text)
+{
+	TRAppendLog(@"install.log", text ?: @"");
+}
+NSString *TRDaemonRequest(NSString *path)
+{
+	int fd = socket(AF_INET, SOCK_STREAM, 0);
+	if (fd < 0) return [NSString stringWithFormat:@"socket errno=%d", errno];
+
+	struct sockaddr_in a;
+	memset(&a, 0, sizeof(a));
+	a.sin_family = AF_INET;
+	a.sin_port = htons(TR_DAEMON_PORT);
+	a.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+
+	if (connect(fd, (struct sockaddr *)&a, sizeof(a)) < 0)
+	{
+		int e = errno;
+		close(fd);
+		return [NSString stringWithFormat:@"connect errno=%d", e];
+	}
+	NSString *req = [NSString stringWithFormat:
+		@"GET %@ HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n", path];
+	const char *bytes = req.UTF8String;
+	write(fd, bytes, strlen(bytes));
+
+	NSMutableData *d = [NSMutableData data];
+	char b[2048];
+	ssize_t n;
+	while ((n = read(fd, b, sizeof(b))) > 0) [d appendBytes:b length:(NSUInteger)n];
+	close(fd);
+
+	NSString *s = [[NSString alloc] initWithData:d encoding:NSUTF8StringEncoding];
+	if (!s) return @"(无响应)";
+	NSRange r = [s rangeOfString:@"\r\n\r\n"];
+	if (r.location != NSNotFound) return [s substringFromIndex:r.location + r.length];
+	return s;
+}
 int TRLaunchDaemonDetached(void)
 {
 	return TRSpawnSelf(@[@"--daemon"], YES);

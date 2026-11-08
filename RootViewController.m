@@ -32,7 +32,7 @@
 	CGFloat pad = 16.0;
 
 	self.titleLabel = [[UILabel alloc] initWithFrame:CGRectMake(pad, 48, w - pad * 2, 36)];
-	self.titleLabel.text = @"TrollReboot 1.4";
+	self.titleLabel.text = @"TrollReboot 1.5";
 	self.titleLabel.font = [UIFont boldSystemFontOfSize:28];
 	[self.view addSubview:self.titleLabel];
 
@@ -130,7 +130,7 @@
 - (void)refreshStatus
 {
 	NSMutableString *m = [NSMutableString string];
-	[m appendFormat:@"build = TrollReboot 1.4\n"];
+	[m appendFormat:@"build = TrollReboot 1.5\n"];
 	[m appendFormat:@"app uid=%u euid=%u\n", getuid(), geteuid()];
 
 	NSDictionary *st = TRDaemonStatus();
@@ -206,19 +206,38 @@
 	[self appendLog:@"--- 设为开机自启 ---"];
 
 	dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
-		int rc = TRInstallDaemonViaRoot();
+		BOOL wasOnline = [TRDaemonStatus()[@"online"] boolValue];
+		NSString *reply = nil;
+		int rc;
+
+		// 优先让已经在跑的 root 守护进程自己写 plist（不需要再 spawn 提权）
+		if (wasOnline)
+		{
+			reply = TRDaemonRequest(@"/install");
+			rc = 0;
+			TRAppendInstallLog([NSString stringWithFormat:@"[app] 通过守护安装：%@", reply ?: @"(无响应)"]);
+		}
+		else
+		{
+			rc = TRInstallDaemonViaRoot();
+			TRAppendInstallLog([NSString stringWithFormat:@"[app] 守护不在线，走 spawn 安装 rc=%d", rc]);
+		}
 		sleep(2);
+
 		NSDictionary *st = TRDaemonStatus();
 		BOOL online = [st[@"online"] boolValue];
+		BOOL libPlist = [st[@"plistExists"] boolValue];
 		BOOL systemPlist = [st[@"systemPlistExists"] boolValue];
 
 		dispatch_async(dispatch_get_main_queue(), ^{
 			[self refreshStatus];
 			NSMutableString *msg = [NSMutableString string];
-			[msg appendFormat:@"软安装 rc=%d，在线=%@\n", rc, online ? @"是" : @"否"];
-			if (rc == 0) [msg appendString:@"✅ 软安装完成：现在重启手机，重启后先别打开 App，直接看心跳/自动化是否生效；没起来再点「写系统盘」"];
+			[msg appendFormat:@"路径=%@ rc=%d 在线=%@ plist(/Library)=%@\n",
+				wasOnline ? @"守护(root)" : @"spawn", rc, online ? @"是" : @"否", libPlist ? @"在" : @"无"];
+			if (wasOnline && reply.length) [msg appendFormat:@"回复：%@\n", reply];
+			if (libPlist) [msg appendString:@"✅ 软安装完成：重启手机后先别打开 App，看自动化是否生效；没起来再点「写系统盘」"];
 			else if (systemPlist) [msg appendString:@"⚠️ /System 里已有 plist，重启后看是否自动起来"];
-			else [msg appendString:@"❌ /Library 写入失败，请看下面 install.log"];
+			else [msg appendString:@"❌ 两个位置都没有 plist，请看下面 install.log"];
 			[self appendLog:msg];
 			self.busy = NO;
 			self.autostartButton.enabled = YES;
@@ -233,16 +252,29 @@
 	[self appendLog:@"--- 强制写入系统盘（会尝试重挂根分区）---"];
 
 	dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
-		int rc = TRInstallDaemonHardViaRoot();
+		BOOL wasOnline = [TRDaemonStatus()[@"online"] boolValue];
+		NSString *reply = nil;
+		int rc;
+
+		if (wasOnline)
+		{
+			reply = TRDaemonRequest(@"/install-hard");
+			rc = 0;
+		}
+		else
+		{
+			rc = TRInstallDaemonHardViaRoot();
+		}
 		sleep(2);
 		BOOL systemPlist = [TRDaemonStatus()[@"systemPlistExists"] boolValue];
 
 		dispatch_async(dispatch_get_main_queue(), ^{
 			[self refreshStatus];
-			NSString *msg;
-			if (rc == 0 && systemPlist) msg = @"✅ /System plist 已写入，重启手机后 launchd 会自己加载";
-			else if (systemPlist) msg = @"⚠️ plist 在，但安装返回非 0，看 install.log";
-			else msg = @"❌ 系统分区写不进去（只读且重挂失败），改走「打开 URL 自动化」";
+			NSMutableString *msg = [NSMutableString string];
+			[msg appendFormat:@"路径=%@ rc=%d /System=%@\n", wasOnline ? @"守护(root)" : @"spawn", rc, systemPlist ? @"在" : @"无"];
+			if (wasOnline && reply.length) [msg appendFormat:@"回复：%@\n", reply];
+			if (systemPlist) [msg appendString:@"✅ /System plist 已写入，重启手机后 launchd 会自己加载"];
+			else [msg appendString:@"❌ 系统分区写不进去（只读且重挂失败），改走「打开 URL 自动化」"];
 			[self appendLog:msg];
 			self.busy = NO;
 		});
