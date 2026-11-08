@@ -2,14 +2,17 @@
 //
 // 设计原则（用户定的）：
 //   * 绝对不碰 App 自己的电池读取 / 机型信息代码，只做「加一层能力」；
+//   * 电池数据不自己另读一份：把 App 已经读到的那一份**原样转发**过来用（桥接，不裁剪字段）；
 //   * 联合条件写死在程序里，界面只留一个「多少分钟」输入框 + 保存 + 立即重启；
-//   * 拔电即清零，宁漏报不误重启；重启走 TrollStore helper（persona 99 + uid 0）。
+//   * 拔电即清零，宁漏报不误重启；重启走 TrollStore helper（persona 99 + uid 0）；
+//   * 每 2 秒滚动输出一次：App 原始数据 + 归一化读数 + 联合条件 + 安全三项。
 //
-// 复用 TrollReboot 的三块已验证代码：TRBattery（读电池）、TRMonitor（条件/持久化/安全约束）、
-// TRRootOps（spawnRoot + trollstorehelper reboot）。
+// 复用 TrollReboot 的三块已验证代码：TRBattery（仅在 App 数据缺失时兜底）、
+// TRMonitor（条件/持久化/安全约束）、TRRootOps（spawnRoot + trollstorehelper reboot）。
 
 #import <Foundation/Foundation.h>
 #import <UIKit/UIKit.h>
+#import <objc/runtime.h>
 
 #import <fcntl.h>
 #import <unistd.h>
@@ -24,12 +27,14 @@
 #import "TRMonitor.h"
 #import "TRRootOps.h"
 
-#define BG_TAG @"BatteryGuard 1.0"
+#define BG_TAG @"BatteryGuard 1.1 app-bridge"
 #define BGDIR @"/var/mobile/Library/Caches/com.wan.batterychargeguard"
+#define BG_TICK_SEC 2.0
+#define BG_LOG_MAX 512 * 1024
 
 extern int reboot(int);
 
-#pragma mark - 日志
+#pragma mark - 日志（滚动，超限自动截断重开）
 
 static NSString *BGLogPath(void)
 {
@@ -58,409 +63,764 @@ static void BGLog(NSString *line)
 
 	NSString *full = [NSString stringWithFormat:@"%s %@\n", ts, line];
 	NSData *d = [full dataUsingEncoding:NSUTF8StringEncoding];
-	if (d.length == 0)
+	if (!d)
 		return;
 
-	int fd = open(BGLogPath().fileSystemRepresentation, O_WRONLY | O_CREAT | O_APPEND, 0644);
+	NSString *path = BGLogPath();
+	NSFileManager *fm = [NSFileManager defaultManager];
+	NSDictionary *attr = [fm attributesOfItemAtPath:path error:nil];
+	if ([[attr objectForKey:NSFileSize] unsignedLongLongValue] > BG_LOG_MAX)
+	{
+		NSString *old = [path stringByAppendingString:@".1"];
+		[fm removeItemAtPath:old error:nil];
+		[fm moveItemAtPath:path toPath:old error:nil];
+	}
+
+	int fd = open(path.fileSystemRepresentation, O_WRONLY | O_CREAT | O_APPEND, 0644);
 	if (fd < 0)
 		return;
-	const char *bytes = (const char *)d.bytes;
-	size_t left = d.length;
-	while (left > 0)
-	{
-		ssize_t n = write(fd, bytes, left);
-		if (n <= 0)
-			break;
-		bytes += n;
-		left -= (size_t)n;
-	}
+	ssize_t ignore = write(fd, d.bytes, d.length);
+	(void)ignore;
 	fsync(fd);
 	close(fd);
 }
 
-#pragma mark - 共享状态
+#pragma mark - 通用取值
 
-static pthread_mutex_t gLock = PTHREAD_MUTEX_INITIALIZER;
-static double gStuckSec = 0;
-static double gGraceSec = 0;
-static NSString *gNote = @"启动中";
-static BOOL gRebooting = NO;
-static NSInteger gTicks = 0;
-static NSString *gLastBatteryLine = @"";
-
-static UILabel *gStatusLabel = nil;
-static UITextField *gMinField = nil;
-static UIView *gPanel = nil;
-
-static void BGSetNote(NSString *note)
+static id BGInvoke(id target, SEL sel)
 {
-	pthread_mutex_lock(&gLock);
-	gNote = [note copy];
-	pthread_mutex_unlock(&gLock);
+	if (!target || ![target respondsToSelector:sel])
+		return nil;
+
+	NSMethodSignature *sig = [target methodSignatureForSelector:sel];
+	if (!sig)
+		return nil;
+
+	NSInvocation *inv = [NSInvocation invocationWithMethodSignature:sig];
+	[inv setTarget:target];
+	[inv setSelector:sel];
+	@try
+	{
+		[inv invoke];
+	}
+	@catch (NSException *e)
+	{
+		return nil;
+	}
+
+	if (sig.methodReturnLength == 0)
+		return nil;
+
+	__unsafe_unretained id ret = nil;
+	[inv getReturnValue:&ret];
+	return ret;
 }
 
-static NSDictionary *BGLive(void)
+static id BGPick(NSDictionary *d, NSArray<NSString *> *keys)
 {
-	pthread_mutex_lock(&gLock);
-	NSDictionary *d = @{ @"stuckSec" : @(gStuckSec), @"note" : gNote ?: @"" };
-	pthread_mutex_unlock(&gLock);
-	return d;
+	if ([d isKindOfClass:[NSDictionary class]] == NO)
+		return nil;
+
+	for (NSString *k in keys)
+	{
+		id v = d[k];
+		if (v)
+			return v;
+	}
+	// 大小写/空格不敏感再找一轮（App 的键名风格未知，这一层保证不丢）
+	for (NSString *k in keys)
+	{
+		NSString *want = [[k lowercaseString] stringByReplacingOccurrencesOfString:@" " withString:@""];
+		for (NSString *kk in d)
+		{
+			NSString *have = [[[kk description] lowercaseString] stringByReplacingOccurrencesOfString:@" " withString:@""];
+			if ([have isEqualToString:want])
+				return d[kk];
+		}
+	}
+	return nil;
+}
+
+static NSNumber *BGNumber(id v)
+{
+	if ([v isKindOfClass:[NSNumber class]])
+		return v;
+	if ([v isKindOfClass:[NSString class]])
+	{
+		NSScanner *sc = [NSScanner scannerWithString:(NSString *)v];
+		double d = 0;
+		if ([sc scanDouble:&d])
+			return @(d);
+	}
+	return nil;
+}
+
+static NSNumber *BGBool(id v)
+{
+	if ([v isKindOfClass:[NSNumber class]])
+		return @([v boolValue]);
+	if ([v isKindOfClass:[NSString class]] == NO)
+		return nil;
+
+	NSString *s = [(NSString *)v lowercaseString];
+	if ([s rangeOfString:@"未"].location != NSNotFound)
+		return @NO;
+	if ([s rangeOfString:@"false"].location != NSNotFound)
+		return @NO;
+	if ([s rangeOfString:@"no"].location != NSNotFound)
+		return @NO;
+	if ([s rangeOfString:@"true"].location != NSNotFound)
+		return @YES;
+	if ([s rangeOfString:@"yes"].location != NSNotFound)
+		return @YES;
+	if ([s isEqualToString:@"1"])
+		return @YES;
+	if ([s rangeOfString:@"是"].location != NSNotFound)
+		return @YES;
+	return nil;
+}
+
+static NSNumber *BGNumberAfter(NSString *text, NSString *label)
+{
+	if (text.length == 0 || label.length == 0)
+		return nil;
+
+	NSRange r = [text rangeOfString:label];
+	if (r.location == NSNotFound)
+		return nil;
+
+	NSUInteger start = r.location + r.length;
+	NSUInteger len = MIN((NSUInteger)32, text.length - start);
+	NSString *tail = [text substringWithRange:NSMakeRange(start, len)];
+
+	NSScanner *sc = [NSScanner scannerWithString:tail];
+	NSCharacterSet *skip = [[NSCharacterSet characterSetWithCharactersInString:@"0123456789-."] invertedSet];
+	[sc setCharactersToBeSkipped:skip];
+
+	double d = 0;
+	if ([sc scanDouble:&d])
+		return @(d);
+	return nil;
+}
+
+static NSNumber *BGPercent(NSString *text)
+{
+	if (text.length == 0)
+		return nil;
+
+	NSRegularExpression *re = [NSRegularExpression regularExpressionWithPattern:@"([0-9]{1,3})\\s*%" options:0 error:nil];
+	NSTextCheckingResult *m = [re firstMatchInString:text options:0 range:NSMakeRange(0, text.length)];
+	if (!m)
+		return nil;
+	NSString *num = [text substringWithRange:[m rangeAtIndex:1]];
+	return @([num integerValue]);
+}
+
+static NSNumber *BGFlag(NSString *text, NSArray<NSString *> *noWords, NSArray<NSString *> *yesWords)
+{
+	if (text.length == 0)
+		return nil;
+
+	// 先看否定词（「未插电」「未在充电」「已充满」里也含肯定词）
+	for (NSString *w in noWords)
+		if ([text rangeOfString:w].location != NSNotFound)
+			return @NO;
+	for (NSString *w in yesWords)
+		if ([text rangeOfString:w].location != NSNotFound)
+			return @YES;
+	return nil;
+}
+
+#pragma mark - 主线程桥接：把 App 自己读到的数据整份拿出来
+
+static NSDictionary *BGAppDataOnMain(NSString **sourceName)
+{
+	NSMutableDictionary *merged = [NSMutableDictionary dictionary];
+	NSMutableArray<NSString *> *sources = [NSMutableArray array];
+
+	// ① 电池助手自己的工具类：+[BatteryUtil shareInfolist]（App 内部就是靠它拿完整字段）
+	Class buClass = NSClassFromString(@"BatteryUtil");
+	if (buClass)
+	{
+		id r = BGInvoke((id)buClass, NSSelectorFromString(@"shareInfolist"));
+		if (r)
+		{
+			[sources addObject:@"BatteryUtil.shareInfolist"];
+			if ([r isKindOfClass:[NSDictionary class]])
+			{
+				[merged addEntriesFromDictionary:(NSDictionary *)r];
+			}
+			else if ([r isKindOfClass:[NSArray class]])
+			{
+				NSInteger idx = 0;
+				for (id item in (NSArray *)r)
+				{
+					if ([item isKindOfClass:[NSDictionary class]])
+						[merged addEntriesFromDictionary:(NSDictionary *)item];
+					else
+						[merged setObject:[item description]
+						           forKey:[NSString stringWithFormat:@"item-%ld", (long)idx]];
+					idx++;
+				}
+			}
+			else
+			{
+				[merged setObject:[r description] forKey:@"shareInfolist"];
+			}
+		}
+	}
+
+	// ② App 自己的 ViewController：GetBatteryInfo 等取值入口（同名不同实现都试一遍）
+	UIWindow *key = [UIApplication sharedApplication].keyWindow;
+	id root = key.rootViewController;
+	for (NSString *selName in @[ @"GetBatteryInfo", @"getBatteryInfo", @"batteryInfo", @"shareInfolist" ])
+	{
+		id r = BGInvoke(root, NSSelectorFromString(selName));
+		if (!r)
+			continue;
+		[sources addObject:[@"vc." stringByAppendingString:selName]];
+		if ([r isKindOfClass:[NSDictionary class]])
+			[merged addEntriesFromDictionary:(NSDictionary *)r];
+		else
+			[merged setObject:[r description] forKey:selName];
+	}
+
+	if (sourceName)
+		*sourceName = sources.count ? [sources componentsJoinedByString:@"+"] : @"none";
+
+	return merged.count ? merged : nil;
+}
+
+/// App 界面上正在显示的文字，整份拼起来（不截断）——App 只往 UILabel 上写文本时靠它
+static void BGCollectTexts(UIView *v, NSMutableArray<NSString *> *out, NSMutableSet<NSString *> *seen, NSUInteger *budget)
+{
+	if (!v || *budget == 0)
+		return;
+
+	NSString *t = nil;
+	if ([v isKindOfClass:[UILabel class]])
+		t = ((UILabel *)v).text;
+	else if ([v isKindOfClass:[UITextView class]])
+		t = ((UITextView *)v).text;
+	else if ([v isKindOfClass:[UIButton class]])
+		t = [((UIButton *)v) titleForState:UIControlStateNormal];
+
+	if (t.length && ![seen containsObject:t])
+	{
+		[seen addObject:t];
+		[out addObject:t];
+		if (*budget > 0)
+			(*budget)--;
+	}
+
+	for (UIView *sub in v.subviews)
+		BGCollectTexts(sub, out, seen, budget);
+}
+
+static NSString *BGAppTextOnMain(void)
+{
+	UIWindow *key = [UIApplication sharedApplication].keyWindow;
+	if (!key)
+		return @"";
+	NSMutableArray<NSString *> *texts = [NSMutableArray array];
+	NSMutableSet<NSString *> *seen = [NSMutableSet set];
+	NSUInteger budget = 80;
+	BGCollectTexts(key, texts, seen, &budget);
+	return [texts componentsJoinedByString:@" | "];
+}
+
+#pragma mark - 归一化：App 原始字段 → 联合条件需要的字段（原字段全部保留）
+
+static NSDictionary *BGMakeSample(NSDictionary *app, NSString *text)
+{
+	NSMutableDictionary *s = [NSMutableDictionary dictionary];
+	if (app)
+		[s addEntriesFromDictionary:app];          // 原样转发：App 有多少字段就带多少字段
+	if (text)
+		s[@"appText"] = text;
+
+	NSNumber *ext = BGBool(BGPick(app, @[ @"ExternalConnected", @"ExternalConnect", @"External", @"已插电" ]));
+	NSNumber *chg = BGBool(BGPick(app, @[ @"IsCharging", @"Charging", @"正在充电" ]));
+	NSNumber *pct = BGNumber(BGPick(app, @[ @"Current Capacity", @"CurrentCapacity", @"BatteryLevel", @"电量" ]));
+	NSNumber *cur = BGNumber(BGPick(app, @[ @"InstantAmperage", @"Amperage", @"Current", @"电流" ]));
+	NSNumber *tmp = BGNumber(BGPick(app, @[ @"Temperature", @"温度" ]));
+	NSNumber *raw = BGNumber(BGPick(app, @[ @"AppleRawCurrentCapacity", @"RawCurrentCapacity", @"实时容量" ]));
+	NSNumber *rawMax = BGNumber(BGPick(app, @[ @"AppleRawMaxCapacity", @"RawMaxCapacity", @"最大容量" ]));
+
+	// 文本兜底（App 把值直接画在 UILabel 上、字典里没有时）
+	if (!pct)
+		pct = BGPercent(text);
+	if (!cur)
+		cur = BGNumberAfter(text, @"电流");
+	if (!tmp)
+		tmp = BGNumberAfter(text, @"温度");
+	if (!ext)
+		ext = BGFlag(text, @[ @"未插电", @"未连接充电器", @"电池供电" ], @[ @"已插电", @"已连接充电器", @"充电器已连接" ]);
+	if (!chg)
+		chg = BGFlag(text, @[ @"未在充电", @"已充满", @"未充电" ], @[ @"充电中", @"正在充电" ]);
+
+	// IOKit 原始温度单位是 0.1℃
+	if (tmp && [tmp doubleValue] > 150.0)
+		tmp = @([tmp doubleValue] / 10.0);
+
+	if (!pct && raw && rawMax && [rawMax doubleValue] > 0)
+		pct = @(round([raw doubleValue] * 100.0 / [rawMax doubleValue]));
+
+	if (ext)
+		s[@"external"] = ext;
+	if (chg)
+		s[@"charging"] = chg;
+	if (pct)
+		s[@"percent"] = pct;
+	if (cur)
+		s[@"currentMA"] = cur;
+	if (tmp)
+		s[@"tempC"] = tmp;
+	if (raw)
+		s[@"rawCapacity"] = raw;
+	if (rawMax)
+		s[@"rawMaxCapacity"] = rawMax;
+
+	BOOL haveSomething = (app.count > 0) || (text.length > 0);
+	BOOL usable = (ext != nil && chg != nil && (pct != nil || (raw && rawMax)) && tmp != nil && cur != nil);
+	s[@"ok"] = @(haveSomething);
+	s[@"usable"] = @(usable);
+	if (!usable)
+		s[@"error"] = haveSomething ? @"App 数据里缺少判定字段" : @"拿不到 App 数据";
+	return s;
+}
+
+#pragma mark - 面板
+
+static UILabel *gBodyLabel = nil;
+static UILabel *gHeadLabel = nil;
+
+static void BGUpdateText(NSString *text)
+{
+	dispatch_async(dispatch_get_main_queue(), ^{
+		if (gBodyLabel)
+			gBodyLabel.text = text;
+	});
 }
 
 #pragma mark - 重启
 
-static BOOL BGDoReboot(NSString *why)
+static BOOL BGFindHelper(NSString **best, NSString **detail)
 {
-	if (gRebooting)
-		return NO;
-	gRebooting = YES;
-
-	BGLog([NSString stringWithFormat:@"[reboot] 触发：%@（uid=%u euid=%u）", why, getuid(), geteuid()]);
-	sync();
-
-	NSString *helper = TRFindTrollStoreHelper();
-	int rc = -1;
-	NSString *err = nil;
-	if (helper.length > 0)
+	NSArray<NSString *> *cands = TRHelperCandidates();
+	NSString *fresh = nil;
+	NSMutableArray<NSString *> *lines = [NSMutableArray array];
+	for (NSString *p in cands)
 	{
-		rc = TRSpawnRoot(helper, @[ @"reboot" ], nil, &err);
-		BGLog([NSString stringWithFormat:@"[reboot] trollstorehelper=%@ rc=%d err=%@",
-		                                 helper, rc, err.length ? err : @"(空)"]);
+		NSString *ver = nil;
+		NSDictionary *s = [[NSFileManager defaultManager] attributesOfItemAtPath:p error:nil];
+		ver = [NSString stringWithFormat:@"%llu", [[s objectForKey:NSFileSize] unsignedLongLongValue]];
+		[lines addObject:[NSString stringWithFormat:@"%@(%@)", p, ver ?: @"?"]];
+		if (!fresh)
+			fresh = p;
+	}
+	if (detail)
+		*detail = lines.count ? [lines componentsJoinedByString:@", "] : @"无候选";
+	if (best)
+		*best = fresh;
+	return fresh != nil;
+}
+
+static void BGRecordTrigger(NSString *why)
+{
+	NSMutableDictionary *st = [TRMonitorStateLoad() mutableCopy];
+	if (!st)
+		st = [NSMutableDictionary dictionary];
+
+	double now = (double)time(NULL);
+	st[@"lastRebootTS"] = @(now);
+	st[@"breaker"] = @([st[@"breaker"] integerValue] + 1);
+	st[@"rebootCountBoot"] = @([st[@"rebootCountBoot"] integerValue] + 1);
+	NSMutableArray *times = [NSMutableArray array];
+	id rawTimes = st[@"rebootTimes"];
+	if ([rawTimes isKindOfClass:[NSArray class]])
+		[times addObjectsFromArray:(NSArray *)rawTimes];
+	[times addObject:@(now)];
+	st[@"rebootTimes"] = times;
+	TRMonitorStateWrite(st);
+	BGLog([NSString stringWithFormat:@"[reboot] 记录触发：%@（本次开机第 %ld 次，熔断计数 %ld）", why,
+	                                 (long)[st[@"rebootCountBoot"] integerValue],
+	                                 (long)[st[@"breaker"] integerValue]]);
+}
+
+static void BGDoReboot(NSString *why)
+{
+	BGLog([NSString stringWithFormat:@"[reboot] 触发：%@ (uid=%d euid=%d)", why, getuid(), geteuid()]);
+	BGRecordTrigger(why);
+
+	NSString *helper = nil;
+	NSString *detail = nil;
+	if (BGFindHelper(&helper, &detail))
+	{
+		BGLog([NSString stringWithFormat:@"[reboot] trollstorehelper=%@ 候选=%@", helper, detail]);
+		NSString *out = nil;
+		NSString *err = nil;
+		int rc = TRSpawnRoot(helper, @[ @"reboot" ], &out, &err);
+		BGLog([NSString stringWithFormat:@"[reboot] trollstorehelper rc=%d out=%@ err=%@",
+		                                 rc, out ?: @"-", err ?: @"-"]);
+		if (rc == 0)
+		{
+			sleep(4);
+			return;
+		}
 	}
 	else
 	{
-		BGLog(@"[reboot] 没找到 trollstorehelper，改用 /sbin/reboot");
+		BGLog([NSString stringWithFormat:@"[reboot] 未找到 trollstorehelper（候选=%@）", detail ?: @"无"]);
 	}
 
-	if (rc != 0)
+	for (NSString *path in @[ @"/sbin/reboot", @"/usr/bin/reboot" ])
 	{
-		NSString *err2 = nil;
-		int rc2 = TRSpawnRoot(@"/sbin/reboot", @[], nil, &err2);
-		BGLog([NSString stringWithFormat:@"[reboot] /sbin/reboot rc=%d err=%@", rc2, err2.length ? err2 : @"(空)"]);
-		if (rc2 != 0)
+		if (![[NSFileManager defaultManager] isExecutableFileAtPath:path])
+			continue;
+		BGLog([NSString stringWithFormat:@"[reboot] 回退 %@", path]);
+		NSString *out = nil;
+		NSString *err = nil;
+		int rc = TRSpawnRoot(path, @[], &out, &err);
+		BGLog([NSString stringWithFormat:@"[reboot] %@ rc=%d out=%@ err=%@", path, rc, out ?: @"-", err ?: @"-"]);
+		if (rc == 0)
 		{
-			NSString *err3 = nil;
-			int rc3 = TRSpawnRoot(@"/usr/bin/reboot", @[], nil, &err3);
-			BGLog([NSString stringWithFormat:@"[reboot] /usr/bin/reboot rc=%d err=%@", rc3, err3.length ? err3 : @"(空)"]);
+			sleep(4);
+			return;
 		}
 	}
 
-	// 本进程不是 root，这一句通常直接失败；留着当最后一道兜底
+	BGLog(@"[reboot] 全部路径失败，调用 reboot(0) 兜底");
 	sync();
-	int r = reboot(0);
-	BGLog([NSString stringWithFormat:@"[reboot] reboot(0) 返回 %d errno=%d", r, errno]);
-
-	gRebooting = NO;
-	return YES;
+	reboot(0);
+	sleep(3);
+	BGLog(@"[reboot] reboot(0) 返回，但没有重启（权限不足）");
 }
 
-#pragma mark - 监控
+#pragma mark - 安全三项
 
-static void BGPushUI(NSString *status)
+static NSString *BGSafetyText(NSDictionary *st)
 {
-	dispatch_async(dispatch_get_main_queue(), ^{
-		if (gStatusLabel != nil)
-		{
-			gStatusLabel.text = status;
-			return;
-		}
-		// 面板还没装（App 可能还在启动），把文本缓存进 note，装面板时会带上
-	});
-}
+	double now = (double)time(NULL);
+	NSMutableArray<NSString *> *parts = [NSMutableArray array];
 
-static void BGSample(void)
-{
-	@autoreleasepool
+	double last = [st[@"lastRebootTS"] doubleValue];
+	double cool = last > 0 ? (last + TRMON_COOLDOWN_SEC - now) : 0;
+	[parts addObject:[NSString stringWithFormat:@"冷却%@", cool > 0 ? [NSString stringWithFormat:@"(%.0fs)", cool] : @"✓"]];
+
+	NSInteger perBoot = [st[@"rebootCountBoot"] integerValue];
+	[parts addObject:[NSString stringWithFormat:@"开机%ld/%d%@", (long)perBoot, TRMON_MAX_PER_BOOT,
+	                                            perBoot >= TRMON_MAX_PER_BOOT ? @"✗" : @"✓"]];
+
+	NSInteger perHour = 0;
+	NSInteger perDay = 0;
+	NSArray *times = st[@"rebootTimes"];
+	if ([times isKindOfClass:[NSArray class]])
 	{
-		gTicks++;
-
-		NSDictionary *sample = TRBatteryRead();
-		NSString *batteryLine = TRBatteryLine(sample);
-		gLastBatteryLine = batteryLine;
-
-		NSInteger minutes = TRMonitorStuckMinutes();
-		double need = (double)minutes * 60.0;
-
-		if (![sample[@"ok"] boolValue])
+		for (id t in times)
 		{
-			pthread_mutex_lock(&gLock);
+			double ts = [t doubleValue];
+			if (ts > now - 3600)
+				perHour++;
+			if (ts > now - 86400)
+				perDay++;
+		}
+	}
+	[parts addObject:[NSString stringWithFormat:@"小时%ld/%d%@", (long)perHour, TRMON_MAX_PER_HOUR,
+	                                            perHour >= TRMON_MAX_PER_HOUR ? @"✗" : @"✓"]];
+	[parts addObject:[NSString stringWithFormat:@"天%ld/%d%@", (long)perDay, TRMON_MAX_PER_DAY,
+	                                            perDay >= TRMON_MAX_PER_DAY ? @"✗" : @"✓"]];
+
+	NSInteger breaker = [st[@"breaker"] integerValue];
+	[parts addObject:[NSString stringWithFormat:@"熔断%ld/%d%@", (long)breaker, TRMON_BREAKER_COUNT,
+	                                            breaker >= TRMON_BREAKER_COUNT ? @"✗" : @"✓"]];
+
+	return [parts componentsJoinedByString:@" "];
+}
+
+#pragma mark - 主循环
+
+static NSInteger gStuckSec = 0;
+static NSInteger gGraceSec = 0;
+static NSInteger gTickSeq = 0;
+static BOOL gRebooting = NO;
+
+static void BGTick(void)
+{
+	gTickSeq++;
+
+	__block NSDictionary *app = nil;
+	__block NSString *sourceName = nil;
+	__block NSString *text = nil;
+
+	dispatch_semaphore_t sem = dispatch_semaphore_create(0);
+	dispatch_async(dispatch_get_main_queue(), ^{
+		@autoreleasepool
+		{
+			app = BGAppDataOnMain(&sourceName);
+			text = BGAppTextOnMain();
+		}
+		dispatch_semaphore_signal(sem);
+	});
+
+	if (dispatch_semaphore_wait(sem, dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.5 * NSEC_PER_SEC))) != 0)
+	{
+		sourceName = @"主线程未响应";
+		BGLog(@"[读] 主线程 1.5s 未返回，本轮视为无数据");
+	}
+
+	NSDictionary *sample = BGMakeSample(app, text);
+
+	NSString *reason = nil;
+	BOOL softOnly = NO;
+	BOOL stuck = TRMonitorSampleIsStuck(sample, &reason, &softOnly);
+	BOOL usable = [sample[@"usable"] boolValue];
+
+	// 累计逻辑
+	NSString *accum = @"";
+	if (stuck)
+	{
+		gStuckSec += (NSInteger)BG_TICK_SEC;
+		gGraceSec = 0;
+	}
+	else if (softOnly && gStuckSec > 0)
+	{
+		gGraceSec += (NSInteger)BG_TICK_SEC;
+		if (gGraceSec > TRMON_GRACE_SEC)
+		{
 			gStuckSec = 0;
 			gGraceSec = 0;
-			pthread_mutex_unlock(&gLock);
-			BGSetNote(@"读不到电池，本轮清零");
-			BGPushUI([NSString stringWithFormat:@"%@ ｜ 读不到电池\n%@", BG_TAG, sample[@"error"] ?: @"?"]);
-			return;
 		}
+	}
+	else
+	{
+		gStuckSec = 0;
+		gGraceSec = 0;
+	}
 
-		BOOL soft = NO;
-		NSString *reason = nil;
-		BOOL stuck = TRMonitorSampleIsStuck(sample, &reason, &soft);
-		BOOL powered = [sample[@"external"] boolValue];
+	NSInteger minutes = TRMonitorStuckMinutes();
+	NSInteger needSec = minutes * 60;
+	accum = [NSString stringWithFormat:@"累计%lds/需%lds(分钟=%ld)", (long)gStuckSec, (long)needSec, (long)minutes];
 
-		if (!powered)
+	NSDictionary *state = TRMonitorStateLoad();
+	NSString *block = TRMonitorSafetyBlock(state);
+	NSString *safety = BGSafetyText(state);
+
+	// —— 每 2 秒滚动输出（面板 + 日志，App 原始字段整份转发，不截断）——
+	NSString *appDump = @"-";
+	if (app.count)
+	{
+		NSMutableArray<NSString *> *kv = [NSMutableArray array];
+		NSArray *sortedKeys = [[app allKeys] sortedArrayUsingSelector:@selector(compare:)];
+		for (NSString *k in sortedKeys)
 		{
-			// 拔电：硬闸立即清零
-			pthread_mutex_lock(&gLock);
+			id v = app[k];
+			NSString *vs = [v isKindOfClass:[NSString class]] ? (NSString *)v : [v description];
+			[kv addObject:[NSString stringWithFormat:@"%@=%@", k, vs]];
+		}
+		appDump = [kv componentsJoinedByString:@" "];
+	}
+
+	NSString *norm = [NSString stringWithFormat:@"电量=%@ 电流=%@mA 温度=%@℃ 插电=%@ 在充=%@",
+	                           sample[@"percent"] ?: @"?",
+	                           sample[@"currentMA"] ?: @"?",
+	                           sample[@"tempC"] ?: @"?",
+	                           [sample[@"external"] boolValue] ? @"Y" : (sample[@"external"] ? @"N" : @"?"),
+	                           [sample[@"charging"] boolValue] ? @"Y" : (sample[@"charging"] ? @"N" : @"?")];
+
+	NSString *cond = stuck ? @"满足" : [NSString stringWithFormat:@"不满足(%@)", reason ?: @"?"];
+	if (gGraceSec > 0)
+		cond = [cond stringByAppendingFormat:@" 容忍%ld/%ds", (long)gGraceSec, TRMON_GRACE_SEC];
+
+	NSMutableArray<NSString *> *panel = [NSMutableArray array];
+	[panel addObject:[NSString stringWithFormat:@"#%ld 源:%@", (long)gTickSeq, sourceName ?: @"?"]];
+	[panel addObject:norm];
+	[panel addObject:[NSString stringWithFormat:@"条件:%@", cond]];
+	[panel addObject:accum];
+	[panel addObject:[NSString stringWithFormat:@"安全:%@", safety]];
+	if (block)
+		[panel addObject:[NSString stringWithFormat:@"阻断:%@", block]];
+	if (sample[@"error"])
+		[panel addObject:[NSString stringWithFormat:@"缺失:%@", sample[@"error"]]];
+
+	BGUpdateText([panel componentsJoinedByString:@"\n"]);
+
+	BGLog([NSString stringWithFormat:@"[tick %ld] %@", (long)gTickSeq, [panel componentsJoinedByString:@" / "]]);
+	BGLog([NSString stringWithFormat:@"[tick %ld] app=%@", (long)gTickSeq, appDump]);
+	if (text.length)
+		BGLog([NSString stringWithFormat:@"[tick %ld] ui=%@", (long)gTickSeq, text]);
+
+	// —— 到阈值才动手 ——
+	if (stuck && gStuckSec >= needSec && !gRebooting)
+	{
+		if (block)
+		{
+			BGLog([NSString stringWithFormat:@"[monitor] 条件已满但被拦下：%@", block]);
 			gStuckSec = 0;
-			gGraceSec = 0;
-			pthread_mutex_unlock(&gLock);
-		}
-		else if (stuck)
-		{
-			pthread_mutex_lock(&gLock);
-			gStuckSec += (double)TRMON_SAMPLE_SEC;
-			gGraceSec = 0;
-			pthread_mutex_unlock(&gLock);
-		}
-		else if (soft)
-		{
-			pthread_mutex_lock(&gLock);
-			if (gStuckSec > 0)
-			{
-				gGraceSec += (double)TRMON_SAMPLE_SEC;
-				if (gGraceSec > (double)TRMON_GRACE_SEC)
-				{
-					gStuckSec = 0;
-					gGraceSec = 0;
-				}
-			}
-			pthread_mutex_unlock(&gLock);
 		}
 		else
 		{
-			pthread_mutex_lock(&gLock);
+			gRebooting = YES;
+			BGLog([NSString stringWithFormat:@"[monitor] ✅ 条件成立（连续 %lds / 需 %lds / %@）",
+			                                 (long)gStuckSec, (long)needSec, norm]);
+			BGDoReboot(@"充电卡死");
 			gStuckSec = 0;
-			gGraceSec = 0;
-			pthread_mutex_unlock(&gLock);
+			gRebooting = NO;
 		}
-
-		// 恢复正常充电 → 熔断计数归零（「连续」才熔断）
-		if (powered && !stuck && !soft)
-		{
-			NSDictionary *st0 = TRMonitorStateLoad();
-			if ([st0[@"breaker"] integerValue] > 0)
-			{
-				NSMutableDictionary *m0 = [st0 mutableCopy];
-				m0[@"breaker"] = @0;
-				TRMonitorStateWrite(m0);
-				BGLog(@"[monitor] 恢复正常充电，熔断计数已归零");
-			}
-		}
-
-		NSDictionary *live = BGLive();
-		double stuckSec = [live[@"stuckSec"] doubleValue];
-
-		if (stuck)
-			BGSetNote([NSString stringWithFormat:@"卡死样 已累计 %ld 秒 / 需 %ld 秒",
-			                                     (long)stuckSec, (long)need]);
-		else if (soft && stuckSec > 0)
-			BGSetNote([NSString stringWithFormat:@"电流短时恢复，容忍中（%ld 秒 / 需 %ld 秒）",
-			                                     (long)stuckSec, (long)need]);
-		else
-			BGSetNote([NSString stringWithFormat:@"不满足：%@", reason ?: @"?"]);
-
-		BOOL willFire = NO;
-
-		if (stuck && stuckSec >= need)
-		{
-			NSDictionary *st = TRMonitorStateLoad();
-			double boot = TRMonitorCurrentBootTime();
-			NSMutableDictionary *st2 = [st mutableCopy];
-
-			if (boot > 0 && fabs([st2[@"bootTS"] doubleValue] - boot) > 1.0)
-			{
-				st2[@"bootTS"] = @(boot);
-				st2[@"rebootCountBoot"] = @0;
-				TRMonitorStateWrite(st2);
-			}
-
-			NSString *block = TRMonitorSafetyBlock(st2);
-			if (block != nil)
-			{
-				BGSetNote([NSString stringWithFormat:@"条件成立但被安全约束挡住：%@", block]);
-				BGLog([NSString stringWithFormat:@"[monitor] 拦下：%@", block]);
-			}
-			else
-			{
-				willFire = YES;
-				double now = (double)time(NULL);
-				NSMutableArray *times = [NSMutableArray arrayWithArray:st2[@"rebootTimes"] ?: @[]];
-				[times addObject:@(now)];
-				while (times.count > 32)
-					[times removeObjectAtIndex:0];
-
-				st2[@"lastRebootTS"] = @(now);
-				st2[@"rebootCountBoot"] = @([st2[@"rebootCountBoot"] integerValue] + 1);
-				st2[@"breaker"] = @([st2[@"breaker"] integerValue] + 1);
-				st2[@"rebootTimes"] = times;
-				TRMonitorStateWrite(st2);
-
-				BGLog([NSString stringWithFormat:
-					   @"[monitor] ✅ 条件成立（连续 %ld 秒 / 需 %ld 分钟 / 电量 %@%% / 电流 %@mA），执行重启",
-					   (long)stuckSec, (long)minutes,
-					   sample[@"percent"] ?: @"?", sample[@"currentMA"] ?: @"?"]);
-
-				BGDoReboot(@"充电卡死");
-			}
-		}
-
-		// UI
-		NSDictionary *st3 = TRMonitorStateLoad();
-		NSString *block3 = TRMonitorSafetyBlock(st3);
-		NSMutableString *ui = [NSMutableString string];
-		[ui appendFormat:@"%@ ｜ 已运行 %ld 秒\n", BG_TAG, (long)gTicks * TRMON_SAMPLE_SEC];
-		[ui appendFormat:@"%@\n", live[@"note"] ?: @""];
-		if (willFire)
-			[ui appendString:@"正在执行重启…"];
-		else if (block3.length > 0)
-			[ui appendFormat:@"⚠ 已停止自动重启：%@", block3];
-		else
-			[ui appendString:@"🟢 自动重启：可用"];
-
-		BGPushUI(ui);
 	}
 }
 
 static void BGStartTimer(void)
 {
-	dispatch_queue_t q = dispatch_queue_create("com.wan.batterychargeguard.monitor", DISPATCH_QUEUE_SERIAL);
-	dispatch_source_t timer = dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER, 0, 0, q);
-	dispatch_source_set_timer(timer,
-	                          dispatch_time(DISPATCH_TIME_NOW, 5ull * NSEC_PER_SEC),
-	                          (uint64_t)TRMON_SAMPLE_SEC * NSEC_PER_SEC,
-	                          1ull * NSEC_PER_SEC);
+	static dispatch_source_t timer = nil;
+	if (timer)
+		return;
+
+	dispatch_queue_t q = dispatch_queue_create("com.wan.batterychargeguard.tick", DISPATCH_QUEUE_SERIAL);
+	timer = dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER, 0, 0, q);
+	dispatch_source_set_timer(timer, dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.0 * NSEC_PER_SEC)),
+	                          (uint64_t)(BG_TICK_SEC * NSEC_PER_SEC), (uint64_t)(0.2 * NSEC_PER_SEC));
 	dispatch_source_set_event_handler(timer, ^{
-		BGSample();
+		@autoreleasepool
+		{
+			BGTick();
+		}
 	});
 	dispatch_resume(timer);
+	BGLog([NSString stringWithFormat:@"[init] 定时器已启动：每 %.0f 秒一轮", BG_TICK_SEC]);
 }
 
-#pragma mark - 面板
-
-static UITextField *BGTextField(CGRect frame)
-{
-	UITextField *f = [[UITextField alloc] initWithFrame:frame];
-	f.backgroundColor = [UIColor colorWithWhite:1.0 alpha:0.14];
-	f.textColor = [UIColor whiteColor];
-	f.font = [UIFont systemFontOfSize:13];
-	f.textAlignment = NSTextAlignmentCenter;
-	f.keyboardType = UIKeyboardTypeNumberPad;
-	f.layer.cornerRadius = 6;
-	return f;
-}
-
-static UIButton *BGButton(CGRect frame, NSString *title)
-{
-	UIButton *b = [UIButton buttonWithType:UIButtonTypeSystem];
-	b.frame = frame;
-	[b setTitle:title forState:UIControlStateNormal];
-	[b setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
-	b.backgroundColor = [UIColor colorWithWhite:1.0 alpha:0.16];
-	b.titleLabel.font = [UIFont boldSystemFontOfSize:12];
-	b.layer.cornerRadius = 6;
-	return b;
-}
+#pragma mark - 面板搭建
 
 static void BGInstallPanel(void)
 {
-	dispatch_async(dispatch_get_main_queue(), ^{
-		if (gPanel != nil)
-			return;
+	if (gBodyLabel)
+		return;
+	UIWindow *key = [UIApplication sharedApplication].keyWindow;
+	if (!key)
+		return;
 
-		UIWindow *win = UIApplication.sharedApplication.keyWindow;
-		if (win == nil && UIApplication.sharedApplication.windows.count > 0)
-			win = UIApplication.sharedApplication.windows.firstObject;
-		if (win == nil)
-			return;
+	CGFloat width = key.bounds.size.width;
+	CGFloat height = 236;
+	CGRect frame = CGRectMake(12, key.bounds.size.height - height - 20, width - 24, height);
 
-		CGRect b = win.bounds;
-		CGFloat w = b.size.width - 16.0;
-		CGFloat h = 96.0;
-		UIView *panel = [[UIView alloc] initWithFrame:CGRectMake(8.0, b.size.height - h - 28.0, w, h)];
-		panel.backgroundColor = [[UIColor blackColor] colorWithAlphaComponent:0.74];
-		panel.layer.cornerRadius = 12.0;
-		panel.autoresizingMask = UIViewAutoresizingFlexibleTopMargin | UIViewAutoresizingFlexibleWidth;
+	UIView *panel = [[UIView alloc] initWithFrame:frame];
+	panel.backgroundColor = [UIColor colorWithWhite:0.07 alpha:0.94];
+	panel.layer.cornerRadius = 12;
+	panel.layer.masksToBounds = YES;
 
-		UILabel *status = [[UILabel alloc] initWithFrame:CGRectMake(10.0, 6.0, w - 20.0, 46.0)];
-		status.numberOfLines = 3;
-		status.font = [UIFont systemFontOfSize:10.5];
-		status.textColor = [UIColor whiteColor];
-		status.text = [NSString stringWithFormat:@"%@ 启动中…", BG_TAG];
-		[panel addSubview:status];
+	gHeadLabel = [[UILabel alloc] initWithFrame:CGRectMake(10, 6, frame.size.width - 20, 14)];
+	gHeadLabel.textColor = [UIColor colorWithRed:0.45 green:0.9 blue:0.55 alpha:1];
+	gHeadLabel.font = [UIFont boldSystemFontOfSize:10];
+	gHeadLabel.text = [[BG_TAG stringByAppendingString:@" · 2s · 转发App读数"] copy];
+	[panel addSubview:gHeadLabel];
 
-		UITextField *field = BGTextField(CGRectMake(10.0, 58.0, 46.0, 28.0));
-		field.text = [NSString stringWithFormat:@"%ld", (long)TRMonitorStuckMinutes()];
-		[panel addSubview:field];
+	gBodyLabel = [[UILabel alloc] initWithFrame:CGRectMake(10, 22, frame.size.width - 20, 132)];
+	gBodyLabel.numberOfLines = 0;
+	gBodyLabel.textColor = [UIColor whiteColor];
+	gBodyLabel.font = [UIFont monospacedSystemFontOfSize:9 weight:UIFontWeightRegular];
+	gBodyLabel.text = @"启动中…（等第一轮 2s 采样）";
+	[panel addSubview:gBodyLabel];
 
-		UILabel *hint = [[UILabel alloc] initWithFrame:CGRectMake(62.0, 58.0, 130.0, 28.0)];
-		hint.text = @"分钟不动就重启";
-		hint.font = [UIFont systemFontOfSize:11];
-		hint.textColor = [UIColor whiteColor];
-		[panel addSubview:hint];
+	UITextField *field = [[UITextField alloc] initWithFrame:CGRectMake(10, 160, 52, 28)];
+	field.backgroundColor = [UIColor colorWithWhite:1 alpha:0.12];
+	field.textColor = [UIColor whiteColor];
+	field.textAlignment = NSTextAlignmentCenter;
+	field.keyboardType = UIKeyboardTypeNumberPad;
+	field.layer.cornerRadius = 6;
+	field.text = [NSString stringWithFormat:@"%ld", (long)TRMonitorStuckMinutes()];
+	[panel addSubview:field];
 
-		UIButton *save = BGButton(CGRectMake(w - 132.0, 58.0, 56.0, 28.0), @"保存");
-		[panel addSubview:save];
+	UILabel *unit = [[UILabel alloc] initWithFrame:CGRectMake(68, 160, 22, 28)];
+	unit.textColor = [UIColor colorWithWhite:1 alpha:0.7];
+	unit.font = [UIFont systemFontOfSize:10];
+	unit.text = @"分钟";
+	[panel addSubview:unit];
 
-		UIButton *rb = BGButton(CGRectMake(w - 68.0, 58.0, 58.0, 28.0), @"立即重启");
-		[panel addSubview:rb];
+	UIButton *save = [UIButton buttonWithType:UIButtonTypeSystem];
+	save.frame = CGRectMake(96, 160, 62, 28);
+	save.backgroundColor = [UIColor colorWithWhite:1 alpha:0.16];
+	[save setTitle:@"保存" forState:UIControlStateNormal];
+	[save setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
+	save.titleLabel.font = [UIFont boldSystemFontOfSize:11];
+	save.layer.cornerRadius = 6;
+	__weak UIButton *weakSave = save;
+	__weak UITextField *weakField = field;
+	[save addAction:[UIAction actionWithHandler:^(__kindof UIAction *a) {
+		NSInteger want = [weakField.text integerValue];
+		NSString *detail = nil;
+		BOOL ok = TRMonitorWriteStuckMinutes(want, &detail);
+		BGLog([NSString stringWithFormat:@"[ui] 保存分钟数=%ld ok=%d detail=%@", (long)want, ok, detail ?: @"-"]);
+		[weakSave setTitle:(ok ? @"已存" : @"失败") forState:UIControlStateNormal];
+		dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+			[weakSave setTitle:@"保存" forState:UIControlStateNormal];
+		});
+	} forControlEvents:UIControlEventTouchUpInside];
+	[panel addSubview:save];
 
-		[win addSubview:panel];
-		gPanel = panel;
-		gStatusLabel = status;
-		gMinField = field;
+	UIButton *rebootBtn = [UIButton buttonWithType:UIButtonTypeSystem];
+	rebootBtn.frame = CGRectMake(166, 160, frame.size.width - 186, 28);
+	rebootBtn.backgroundColor = [UIColor colorWithRed:0.9 green:0.2 blue:0.15 alpha:1];
+	[rebootBtn setTitle:@"立即重启" forState:UIControlStateNormal];
+	[rebootBtn setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
+	rebootBtn.titleLabel.font = [UIFont boldSystemFontOfSize:12];
+	rebootBtn.layer.cornerRadius = 6;
+	[rebootBtn addAction:[UIAction actionWithHandler:^(__kindof UIAction *a) {
+		BGLog(@"[ui] 用户点击「立即重启」");
+		BGDoReboot(@"用户手动");
+	} forControlEvents:UIControlEventTouchUpInside];
+	[panel addSubview:rebootBtn];
 
-		// 保存分钟数：校验范围 1–60，写入配置文件并回读确认
-		[save addAction:[UIAction actionWithHandler:^(__kindof UIAction *a) {
-			NSInteger m = [gMinField.text integerValue];
-			if (m < TRMON_MINUTES_MIN) m = TRMON_MINUTES_MIN;
-			if (m > TRMON_MINUTES_MAX) m = TRMON_MINUTES_MAX;
-			gMinField.text = [NSString stringWithFormat:@"%ld", (long)m];
-			NSString *detail = nil;
-			BOOL ok = TRMonitorWriteStuckMinutes(m, &detail);
-			NSInteger readback = TRMonitorStuckMinutesFromFile();
-			BGLog([NSString stringWithFormat:@"[ui] 保存分钟数 %ld ok=%d readback=%ld detail=%@",
-			                                     (long)m, ok, (long)readback, detail ?: @"?"]);
-			[gMinField resignFirstResponder];
-		}] forControlEvents:UIControlEventTouchUpInside];
+	UILabel *hint = [[UILabel alloc] initWithFrame:CGRectMake(10, 194, frame.size.width - 20, 34)];
+	hint.numberOfLines = 0;
+	hint.textColor = [UIColor colorWithWhite:1 alpha:0.55];
+	hint.font = [UIFont systemFontOfSize:9];
+	hint.text = @"条件：插电+在充+未满+温度0–45℃+|电流|<50mA 持续 N 分钟。安全：15min冷却/开机3次/小时3次/天8次/熔断3次。";
+	[panel addSubview:hint];
 
-		[rb addAction:[UIAction actionWithHandler:^(__kindof UIAction *a) {
-			BGLog(@"[ui] 手动点击「立即重启」");
-			BGDoReboot(@"手动点击");
-		}] forControlEvents:UIControlEventTouchUpInside];
+	[key addSubview:panel];
+
+	dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^
+	{
+		gHeadLabel.text = [[BG_TAG stringByAppendingFormat:@" · 2s · 源%@", @"App"] copy];
 	});
+
+	BGLog(@"[init] 面板已安装");
 }
 
-#pragma mark - 启动
+#pragma mark - 入口
 
 __attribute__((constructor)) static void BGInit(void)
 {
-	// 先把状态目录切到自己的，避免和 TrollReboot 守护共享 monitor.state / monitor.conf
-	TRMonitorSetDirectory(@"/var/mobile/Library/Caches/com.wan.batterychargeguard");
+	@autoreleasepool
+	{
+		TRMonitorSetDirectory(BGDIR);
+		BGLog(@"================ BatteryGuard 启动 ================");
+		BGLog([NSString stringWithFormat:@"[init] %@，进程 %@，uid=%d euid=%d", BG_TAG,
+		                                 [[NSProcessInfo processInfo] processName], getuid(), geteuid()]);
 
-	BGLog(@"============================================================");
-	BGLog([NSString stringWithFormat:@"[init] %@ 载入 pid=%d uid=%u euid=%u", BG_TAG, getpid(), getuid(), geteuid()]);
+		Class bu = NSClassFromString(@"BatteryUtil");
+		BGLog([NSString stringWithFormat:@"[init] BatteryUtil=%@ shareInfolist=%@",
+		                                 bu ? @"有" : @"无",
+		                                 (bu && [bu respondsToSelector:NSSelectorFromString(@"shareInfolist")]) ? @"有" : @"无"]);
 
-	[[NSNotificationCenter defaultCenter] addObserverForName:UIApplicationDidFinishLaunchingNotification
-	                                                  object:nil
-	                                                   queue:[NSOperationQueue mainQueue]
-	                                              usingBlock:^(NSNotification *n) {
-		BGLog(@"[init] UIApplicationDidFinishLaunching");
-		dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 3ull * NSEC_PER_SEC), dispatch_get_main_queue(), ^{
+		NSNotificationCenter *nc = [NSNotificationCenter defaultCenter];
+		[nc addObserverForName:UIApplicationDidFinishLaunchingNotification object:nil queue:[NSOperationQueue mainQueue] usingBlock:^(NSNotification *n) {
+			BGLog(@"[init] didFinishLaunching");
+			dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(3 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+				BGInstallPanel();
+				BGStartTimer();
+			});
+		}];
+		[nc addObserverForName:UIApplicationDidBecomeActiveNotification object:nil queue:[NSOperationQueue mainQueue] usingBlock:^(NSNotification *n) {
+			BGLog(@"[init] didBecomeActive");
 			BGInstallPanel();
+			BGStartTimer();
+		}];
+
+		dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(4 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+			BGInstallPanel();
+			BGStartTimer();
 		});
-	}];
-
-	[[NSNotificationCenter defaultCenter] addObserverForName:UIApplicationDidBecomeActiveNotification
-	                                                  object:nil
-	                                                   queue:[NSOperationQueue mainQueue]
-	                                              usingBlock:^(NSNotification *n) {
-		BGInstallPanel();
-	}];
-
-	// App 若已经启动完（dylib 在 main 之前载入，通常还没），补一次
-	dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 4ull * NSEC_PER_SEC), dispatch_get_main_queue(), ^{
-		BGInstallPanel();
-	});
-
-	BGStartTimer();
+	}
 }
