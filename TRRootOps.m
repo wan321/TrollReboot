@@ -104,20 +104,28 @@ int TRSpawnRoot(NSString *path, NSArray<NSString *> *args, NSString **stdOut, NS
 	dispatch_semaphore_t sema = dispatch_semaphore_create(0);
 	int drains = 0;
 
-	if (stdOut && out[0] >= 0)
+	// block 里不能直接引用数组类型，先把 fd 取成标量
+	int outReadFd = out[0];
+	int outWriteFd = out[1];
+	int errReadFd = outErr[0];
+	int errWriteFd = outErr[1];
+
+	if (stdOut && outReadFd >= 0)
 	{
-		close(out[1]);
+		close(outWriteFd);
+		int fd = outReadFd;
 		drains++;
 		dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
-			TRDrainPipe(out[0], outString, sema);
+			TRDrainPipe(fd, outString, sema);
 		});
 	}
-	if (stdErr && outErr[0] >= 0)
+	if (stdErr && errReadFd >= 0)
 	{
-		close(outErr[1]);
+		close(errWriteFd);
+		int fd = errReadFd;
 		drains++;
 		dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
-			TRDrainPipe(outErr[0], errString, sema);
+			TRDrainPipe(fd, errString, sema);
 		});
 	}
 

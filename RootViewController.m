@@ -9,6 +9,7 @@
 @property (nonatomic, strong) UIButton *rebootButton;
 @property (nonatomic, strong) UITextView *statusView;
 @property (nonatomic, assign) BOOL busy;
+@property (nonatomic, strong) NSURL *pendingURL;
 @end
 
 @implementation RootViewController
@@ -71,6 +72,12 @@
 {
 	[super viewDidAppear:animated];
 	[self refreshStaticInfo];
+	if (self.pendingURL)
+	{
+		NSURL *url = self.pendingURL;
+		self.pendingURL = nil;
+		[self handleIncomingURL:url];
+	}
 }
 
 - (void)refreshStaticInfo
@@ -143,6 +150,13 @@
 
 - (void)handleIncomingURL:(NSURL *)url
 {
+	// 冷启动时 URL 会在 viewDidLoad 之前送到，先存起来
+	if (!self.isViewLoaded)
+	{
+		self.pendingURL = url;
+		return;
+	}
+
 	NSString *scheme = url.scheme.lowercaseString;
 	NSString *host = url.host.lowercaseString;
 	[self appendLog:[NSString stringWithFormat:@"收到 URL: %@", url.absoluteString]];
