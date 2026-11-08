@@ -45,8 +45,17 @@ jobs:
         run: |
           set -euo pipefail
           make clean || true
-          make package FINALPACKAGE=1 PACKAGE_FORMAT=ipa
+          set -o pipefail
+          make package FINALPACKAGE=1 PACKAGE_FORMAT=ipa 2>&1 | tee build.log
           ls -la packages || true
+
+      - name: Upload build log on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-log
+          path: build.log
+          if-no-files-found: ignore
 
       - name: Verify package
         shell: bash

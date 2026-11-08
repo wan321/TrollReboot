@@ -99,7 +99,7 @@ static void TRKillSpringBoard(void)
 	{
 		pid_t pid = info[i].kp_proc.p_pid;
 		if (pid <= 0) continue;
-		char name[2 * MAXCOMLEN + 1] = {0};
+		char name[64] = {0};
 		strlcpy(name, info[i].kp_proc.p_comm, sizeof(name));
 		if (strcmp(name, "SpringBoard") == 0)
 		{
