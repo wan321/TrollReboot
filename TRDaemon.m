@@ -5,6 +5,7 @@
 #include <sys/wait.h>
 #include <sys/socket.h>
 #include <sys/sysctl.h>
+#include <sys/stat.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
 #include <unistd.h>
@@ -19,9 +20,11 @@
 // iOS SDK 里没有 sys/reboot.h，自己声明
 extern int reboot(int);
 
-#define TR_DAEMON_PORT   8899
-#define TR_DAEMON_LABEL  "com.wan.trollreboot.daemon"
-#define TR_DAEMON_PLIST  "/Library/LaunchDaemons/com.wan.trollreboot.daemon.plist"
+#define TR_DAEMON_PORT     8899
+#define TR_DAEMON_LABEL    "com.wan.trollreboot.daemon"
+#define TR_DAEMON_PLIST    "/Library/LaunchDaemons/com.wan.trollreboot.daemon.plist"
+#define TR_SYSTEM_PLIST    "/System/Library/LaunchDaemons/com.wan.trollreboot.daemon.plist"
+#define TR_LAUNCHCTL       "/bin/launchctl"
 
 static NSString *const TRBaseDirPath = @"/var/mobile/Library/Caches/com.wan.trollreboot";
 
@@ -34,8 +37,10 @@ static NSString *TRPath(NSString *name)
 
 static void TREnsureBaseDir(void)
 {
-	NSFileManager *fm = [NSFileManager defaultManager];
-	[fm createDirectoryAtPath:TRBaseDirPath withIntermediateDirectories:YES attributes:@{NSFilePosixPermissions: @0777} error:nil];
+	[[NSFileManager defaultManager] createDirectoryAtPath:TRBaseDirPath
+	                          withIntermediateDirectories:YES
+	                                           attributes:@{NSFilePosixPermissions: @0777}
+	                                                error:nil];
 }
 
 static void TRAppendLog(NSString *name, NSString *text)
@@ -46,7 +51,6 @@ static void TRAppendLog(NSString *name, NSString *text)
 	NSData *data = [line dataUsingEncoding:NSUTF8StringEncoding];
 	NSFileManager *fm = [NSFileManager defaultManager];
 
-	// 超过 128KB 就清空，避免无限增长
 	NSDictionary *attrs = [fm attributesOfItemAtPath:path error:nil];
 	if (attrs && [attrs[NSFileSize] unsignedLongLongValue] > 128 * 1024)
 	{
@@ -70,10 +74,11 @@ static void TRAppendLog(NSString *name, NSString *text)
 static const char *ctimeString(void)
 {
 	static char buf[32];
-	time_t t = time(NULL);
-	struct tm tmv;
-	localtime_r(&t, &tmv);
-	strftime(buf, sizeof(buf), "%H:%M:%S", &tmv);
+	NSDateFormatter *df = [[NSDateFormatter alloc] init];
+	df.dateFormat = @"HH:mm:ss";
+	NSString *s = [df stringFromDate:[NSDate date]];
+	strncpy(buf, s.UTF8String ?: "", sizeof(buf) - 1);
+	buf[sizeof(buf) - 1] = '\0';
 	return buf;
 }
 
@@ -83,6 +88,32 @@ static void TRWriteHeartbeat(void)
 	NSString *text = [NSString stringWithFormat:@"uid=%u euid=%u pid=%d ts=%ld\n",
 		getuid(), geteuid(), getpid(), (long)time(NULL)];
 	[[text dataUsingEncoding:NSUTF8StringEncoding] writeToFile:TRPath(@"heartbeat") atomically:YES];
+}
+
+#pragma mark - 通用命令执行
+
+/// 以 root 执行一条命令，返回 exit code，并把 stdout/stderr 拼进 out
+static int TRRunCmd(NSString *path, NSArray<NSString *> *args, NSString **out)
+{
+	NSString *o = nil;
+	NSString *e = nil;
+	int rc = TRSpawnRoot(path, args, &o, &e);
+
+	NSMutableString *m = [NSMutableString string];
+	[m appendFormat:@"$ %@ %@  →  rc=%d", path.lastPathComponent, [args componentsJoinedByString:@" "], rc];
+	NSCharacterSet *ws = [NSCharacterSet whitespaceAndNewlineCharacterSet];
+	if (o.length)
+	{
+		NSString *t = [o stringByTrimmingCharactersInSet:ws];
+		if (t.length) [m appendFormat:@"\n   out: %@", t];
+	}
+	if (e.length)
+	{
+		NSString *t = [e stringByTrimmingCharactersInSet:ws];
+		if (t.length) [m appendFormat:@"\n   err: %@", t];
+	}
+	if (out) *out = m;
+	return rc;
 }
 
 #pragma mark - killall
@@ -102,7 +133,7 @@ static void TRKillSpringBoard(void)
 		pid_t pid = info[i].kp_proc.p_pid;
 		if (pid <= 0) continue;
 		char name[64] = {0};
-		strlcpy(name, info[i].kp_proc.p_comm, sizeof(name));
+		strncpy(name, info[i].kp_proc.p_comm, sizeof(name) - 1);
 		if (strcmp(name, "SpringBoard") == 0)
 		{
 			TRAppendLog(@"daemon.log", [NSString stringWithFormat:@"respring: kill(%d, SIGTERM)", pid]);
@@ -112,7 +143,7 @@ static void TRKillSpringBoard(void)
 	free(info);
 }
 
-#pragma mark - heartbeat thread
+#pragma mark - 心跳线程
 
 static void *TRHeartbeatThread(void *arg)
 {
@@ -125,13 +156,14 @@ static void *TRHeartbeatThread(void *arg)
 	return NULL;
 }
 
-#pragma mark - HTTP server
+#pragma mark - HTTP 服务
 
 static void TRRespond(int fd, int code, NSString *body)
 {
 	NSString *resp = [NSString stringWithFormat:
 		@"HTTP/1.1 %d %@\r\nContent-Type: text/plain; charset=utf-8\r\nContent-Length: %lu\r\nConnection: close\r\n\r\n%@",
-		code, code == 200 ? @"OK" : @"ERR", (unsigned long)[body lengthOfBytesUsingEncoding:NSUTF8StringEncoding], body];
+		code, code == 200 ? @"OK" : @"ERR",
+		(unsigned long)[body lengthOfBytesUsingEncoding:NSUTF8StringEncoding], body];
 	const char *bytes = resp.UTF8String;
 	size_t left = strlen(bytes);
 	while (left > 0)
@@ -173,7 +205,8 @@ int TRRunDaemon(void)
 	@autoreleasepool
 	{
 		TREnsureBaseDir();
-		TRAppendLog(@"daemon.log", [NSString stringWithFormat:@"daemon start uid=%u euid=%u pid=%d", getuid(), geteuid(), getpid()]);
+		TRAppendLog(@"daemon.log", [NSString stringWithFormat:@"daemon start uid=%u euid=%u pid=%d",
+			getuid(), geteuid(), getpid()]);
 
 		pthread_t hb;
 		pthread_create(&hb, NULL, TRHeartbeatThread, NULL);
@@ -195,8 +228,10 @@ int TRRunDaemon(void)
 
 		if (bind(sfd, (struct sockaddr *)&addr, sizeof(addr)) < 0)
 		{
-			TRAppendLog(@"daemon.log", [NSString stringWithFormat:@"bind %d failed errno=%d", TR_DAEMON_PORT, errno]);
+			TRAppendLog(@"daemon.log", [NSString stringWithFormat:@"bind %d failed errno=%d（可能已有实例在跑）",
+				TR_DAEMON_PORT, errno]);
 			close(sfd);
+			TRWriteHeartbeat();
 			return 2;
 		}
 		if (listen(sfd, 8) < 0)
@@ -222,10 +257,7 @@ int TRRunDaemon(void)
 				buf[n] = '\0';
 				NSString *head = [NSString stringWithUTF8String:buf];
 				NSArray *parts = [head componentsSeparatedByString:@" "];
-				if (parts.count >= 2)
-				{
-					reply = TRHandleRequest(parts[1]);
-				}
+				if (parts.count >= 2) reply = TRHandleRequest(parts[1]);
 			}
 			TRRespond(cfd, 200, reply);
 			close(cfd);
@@ -234,14 +266,35 @@ int TRRunDaemon(void)
 	return 0;
 }
 
-#pragma mark - install
+#pragma mark - plist 生成
+
+static NSString *TRDaemonPlistText(NSString *exe)
+{
+	return [NSString stringWithFormat:
+		@"<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n"
+		@"<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n"
+		@"<plist version=\"1.0\"><dict>\n"
+		@"<key>Label</key><string>%s</string>\n"
+		@"<key>ProgramArguments</key><array><string>%@</string><string>--daemon</string></array>\n"
+		@"<key>UserName</key><string>root</string>\n"
+		@"<key>RunAtLoad</key><true/>\n"
+		@"<key>KeepAlive</key><true/>\n"
+		@"<key>ThrottleInterval</key><integer>10</integer>\n"
+		@"<key>ProcessType</key><string>Interactive</string>\n"
+		@"<key>StandardOutPath</key><string>%@</string>\n"
+		@"<key>StandardErrorPath</key><string>%@</string>\n"
+		@"</dict></plist>\n", TR_DAEMON_LABEL, exe, TRPath(@"stdout.log"), TRPath(@"stderr.log")];
+}
+
+#pragma mark - 安装 / 卸载
 
 int TRInstallDaemon(void)
 {
 	@autoreleasepool
 	{
 		TREnsureBaseDir();
-		TRAppendLog(@"install.log", [NSString stringWithFormat:@"install start uid=%u euid=%u", getuid(), geteuid()]);
+		TRAppendLog(@"install.log", @"========== install start ==========");
+		TRAppendLog(@"install.log", [NSString stringWithFormat:@"uid=%u euid=%u", getuid(), geteuid()]);
 
 		if (geteuid() != 0)
 		{
@@ -257,48 +310,99 @@ int TRInstallDaemon(void)
 		}
 		TRAppendLog(@"install.log", [NSString stringWithFormat:@"exe=%@", exe]);
 
-		NSString *plist = [NSString stringWithFormat:
-			@"<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n"
-			@"<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n"
-			@"<plist version=\"1.0\"><dict>\n"
-			@"<key>Label</key><string>%s</string>\n"
-			@"<key>ProgramArguments</key><array><string>%@</string><string>--daemon</string></array>\n"
-			@"<key>UserName</key><string>root</string>\n"
-			@"<key>RunAtLoad</key><true/>\n"
-			@"<key>KeepAlive</key><true/>\n"
-			@"<key>ThrottleInterval</key><integer>10</integer>\n"
-			@"<key>ProcessType</key><string>Interactive</string>\n"
-			@"<key>StandardOutPath</key><string>%@</string>\n"
-			@"<key>StandardErrorPath</key><string>%@</string>\n"
-			@"</dict></plist>\n", TR_DAEMON_LABEL, exe, TRPath(@"stdout.log"), TRPath(@"stderr.log")];
-
+		NSString *plist = TRDaemonPlistText(exe);
+		NSFileManager *fm = [NSFileManager defaultManager];
+		NSString *log = nil;
 		NSError *err = nil;
+
+		// ---- 第 1 步：写 /Library/LaunchDaemons 并 bootstrap ----
 		if (![plist writeToFile:@TR_DAEMON_PLIST atomically:YES encoding:NSUTF8StringEncoding error:&err])
 		{
-			TRAppendLog(@"install.log", [NSString stringWithFormat:@"写 plist 失败: %@", err.localizedDescription]);
-			return 4;
+			TRAppendLog(@"install.log", [NSString stringWithFormat:@"写 %s 失败: %@",
+				TR_DAEMON_PLIST, err.localizedDescription]);
+		}
+		else
+		{
+			[fm setAttributes:@{NSFilePosixPermissions: @0644,
+			                    NSFileOwnerAccountName: @"root",
+			                    NSFileGroupOwnerAccountName: @"wheel"}
+			     ofItemAtPath:@TR_DAEMON_PLIST error:nil];
+			TRAppendLog(@"install.log", @"plist 已写入 /Library/LaunchDaemons");
 		}
 
-		NSFileManager *fm = [NSFileManager defaultManager];
-		[fm setAttributes:@{NSFilePosixPermissions: @0644, NSFileOwnerAccountName: @"root", NSFileGroupOwnerAccountName: @"wheel"} ofItemAtPath:@TR_DAEMON_PLIST error:nil];
-		TRAppendLog(@"install.log", @"plist 已写入 /Library/LaunchDaemons");
+		int rc = TRRunCmd(@TR_LAUNCHCTL, @[@"bootstrap", @"system", @TR_DAEMON_PLIST], &log);
+		TRAppendLog(@"install.log", log);
 
-		// 先尝试 bootstrap（iOS 14 上 /bin/launchctl 存在）
-		int rc = TRSpawnRoot(@"/bin/launchctl", @[@"bootstrap", @"system", @TR_DAEMON_PLIST], nil, nil);
-		TRAppendLog(@"install.log", [NSString stringWithFormat:@"launchctl bootstrap rc=%d", rc]);
-
+		// ---- 第 2 步：老式 load -w ----
 		if (rc != 0)
 		{
-			rc = TRSpawnRoot(@"/bin/launchctl", @[@"load", @"-w", @TR_DAEMON_PLIST], nil, nil);
-			TRAppendLog(@"install.log", [NSString stringWithFormat:@"launchctl load rc=%d", rc]);
+			rc = TRRunCmd(@TR_LAUNCHCTL, @[@"load", @"-w", @TR_DAEMON_PLIST], &log);
+			TRAppendLog(@"install.log", log);
 		}
 
-		TRAppendLog(@"install.log", [NSString stringWithFormat:@"install done rc=%d", rc]);
-		return rc;
+		// ---- 第 3 步：写入 /System/Library/LaunchDaemons（iOS 14 无 SSV，root 可写）----
+		if (rc != 0)
+		{
+			TRAppendLog(@"install.log", @"---- 回退：尝试写入 /System/Library/LaunchDaemons ----");
+			TRRunCmd(@"/sbin/mount", @[@"-u", @"-o", @"rw", @"/"], &log);
+			TRAppendLog(@"install.log", log);
+
+			if ([plist writeToFile:@TR_SYSTEM_PLIST atomically:YES encoding:NSUTF8StringEncoding error:&err])
+			{
+				[fm setAttributes:@{NSFilePosixPermissions: @0644,
+				                    NSFileOwnerAccountName: @"root",
+				                    NSFileGroupOwnerAccountName: @"wheel"}
+				     ofItemAtPath:@TR_SYSTEM_PLIST error:nil];
+				TRAppendLog(@"install.log", @"plist 已写入 /System/Library/LaunchDaemons");
+
+				rc = TRRunCmd(@TR_LAUNCHCTL, @[@"bootstrap", @"system", @TR_SYSTEM_PLIST], &log);
+				TRAppendLog(@"install.log", log);
+				if (rc != 0)
+				{
+					rc = TRRunCmd(@TR_LAUNCHCTL, @[@"load", @"-w", @TR_SYSTEM_PLIST], &log);
+					TRAppendLog(@"install.log", log);
+				}
+			}
+			else
+			{
+				TRAppendLog(@"install.log", [NSString stringWithFormat:
+					@"写 /System plist 失败: %@（大概率是根文件系统只读且无法重挂）", err.localizedDescription]);
+			}
+		}
+
+		// ---- 第 4 步：验证作业是否真的进了 launchd ----
+		int printRc = TRRunCmd(@TR_LAUNCHCTL,
+			@[@"print", [NSString stringWithFormat:@"system/%s", TR_DAEMON_LABEL]], &log);
+		TRAppendLog(@"install.log", log);
+		TRAppendLog(@"install.log", printRc == 0 ? @"✅ launchd 已登记该作业" : @"❌ launchd 未登记该作业");
+		TRAppendLog(@"install.log", [NSString stringWithFormat:@"install done rc=%d printRc=%d", rc, printRc]);
+
+		return printRc == 0 ? 0 : (rc != 0 ? rc : 4);
 	}
 }
 
-#pragma mark - status helpers
+int TRUninstallDaemon(void)
+{
+	@autoreleasepool
+	{
+		NSString *label = [NSString stringWithFormat:@"system/%s", TR_DAEMON_LABEL];
+		NSString *log = nil;
+
+		TRRunCmd(@TR_LAUNCHCTL, @[@"bootout", label], &log);
+		TRAppendLog(@"install.log", log);
+
+		TRRunCmd(@TR_LAUNCHCTL, @[@"unload", @"-w", @TR_DAEMON_PLIST], &log);
+		TRAppendLog(@"install.log", log);
+
+		NSFileManager *fm = [NSFileManager defaultManager];
+		[fm removeItemAtPath:@TR_DAEMON_PLIST error:nil];
+		[fm removeItemAtPath:@TR_SYSTEM_PLIST error:nil];
+		TRAppendLog(@"install.log", @"已删除两个 plist");
+		return 0;
+	}
+}
+
+#pragma mark - 状态
 
 NSDictionary<NSString *, id> *TRDaemonStatus(void)
 {
@@ -316,7 +420,9 @@ NSDictionary<NSString *, id> *TRDaemonStatus(void)
 			out[@"online"] = @(age >= 0 && age < 20);
 		}
 	}
-	out[@"plistExists"] = @([[NSFileManager defaultManager] fileExistsAtPath:@TR_DAEMON_PLIST]);
+	NSFileManager *fm = [NSFileManager defaultManager];
+	out[@"plistExists"] = @([fm fileExistsAtPath:@TR_DAEMON_PLIST]);
+	out[@"systemPlistExists"] = @([fm fileExistsAtPath:@TR_SYSTEM_PLIST]);
 	return out;
 }
 
@@ -332,43 +438,37 @@ static NSString *TRTail(NSString *path, NSUInteger lines)
 NSString *TRDaemonLogTail(NSUInteger lines) { return TRTail(TRPath(@"daemon.log"), lines); }
 NSString *TRInstallLogTail(NSUInteger lines) { return TRTail(TRPath(@"install.log"), lines); }
 
-#pragma mark - spawn self as root
+#pragma mark - 用自身拉起 root 进程
 
-static int TRSpawnSelf(NSArray<NSString *> *args, BOOL detached, NSString **log)
+static int TRSpawnSelf(NSArray<NSString *> *args, BOOL detached)
 {
 	NSString *exe = [NSBundle mainBundle].executablePath;
-	NSMutableString *m = [NSMutableString string];
-	[m appendFormat:@"exe=%@\n", exe];
-
 	NSString *outString = nil;
 	NSString *errString = nil;
-	int rc = 0;
+	int rc;
 
-	if (detached)
+	if (detached) rc = TRSpawnRootDetached(exe, args, &outString, &errString);
+	else rc = TRSpawnRoot(exe, args, &outString, &errString);
+
+	if (rc != 0)
 	{
-		rc = TRSpawnRootDetached(exe, args, &outString, &errString);
-		[m appendFormat:@"detached spawn rc=%d\n", rc];
+		TRAppendLog(@"install.log", [NSString stringWithFormat:@"spawn self %@ rc=%d %@",
+			[args componentsJoinedByString:@" "], rc, errString ?: @""]);
 	}
-	else
-	{
-		rc = TRSpawnRoot(exe, args, &outString, &errString);
-		[m appendFormat:@"spawn rc=%d\n", rc];
-	}
-	if (outString.length) [m appendFormat:@"stdout=%@\n", outString];
-	if (errString.length) [m appendFormat:@"stderr=%@\n", errString];
-	if (log) *log = [m copy];
 	return rc;
 }
 
 int TRLaunchDaemonDetached(void)
 {
-	NSString *log = nil;
-	return TRSpawnSelf(@[@"--daemon"], YES, &log);
+	return TRSpawnSelf(@[@"--daemon"], YES);
 }
 
 int TRInstallDaemonViaRoot(void)
 {
-	NSString *log = nil;
-	int rc = TRSpawnSelf(@[@"--install-daemon"], NO, &log);
-	return rc;
+	return TRSpawnSelf(@[@"--install-daemon"], NO);
+}
+
+int TRUninstallDaemonViaRoot(void)
+{
+	return TRSpawnSelf(@[@"--uninstall-daemon"], NO);
 }

@@ -6,6 +6,9 @@ int TRRunDaemon(void);
 /// 安装模式入口（必须以 root 运行，参数 --install-daemon）
 int TRInstallDaemon(void);
 
+/// 卸载模式入口（必须以 root 运行，参数 --uninstall-daemon）
+int TRUninstallDaemon(void);
+
 /// 守护进程是否在线（读心跳文件）
 NSDictionary<NSString *, id> *TRDaemonStatus(void);
 
@@ -16,5 +19,8 @@ NSString *TRInstallLogTail(NSUInteger lines);
 /// 以 root 分离进程方式拉起自身 --daemon（失败返回 errno）
 int TRLaunchDaemonDetached(void);
 
-/// 以 root 运行自身 --install-daemon 安装 launchd 常驻任务（返回 exit code，spawn 失败返回 errno）
+/// 以 root 运行自身 --install-daemon 安装 launchd 常驻任务
 int TRInstallDaemonViaRoot(void);
+
+/// 以 root 运行自身 --uninstall-daemon 卸载 launchd 常驻任务
+int TRUninstallDaemonViaRoot(void);

@@ -109,6 +109,7 @@ jobs:
           strings -a "$BIN" > /tmp/strings.txt
           grep -q -- '--daemon' /tmp/strings.txt || { echo "ERROR: --daemon flag missing"; exit 1; }
           grep -q -- '--install-daemon' /tmp/strings.txt || { echo "ERROR: --install-daemon flag missing"; exit 1; }
+          grep -q -- '--uninstall-daemon' /tmp/strings.txt || { echo "ERROR: --uninstall-daemon flag missing"; exit 1; }
           grep -q '8899' /tmp/strings.txt || echo "WARN: port 8899 literal not found (可能是分段字符串)"
           grep -q 'launchctl' /tmp/strings.txt || echo "WARN: launchctl literal not found"
           echo "OK: 守护进程入口字符串齐全"
