@@ -1,4 +1,5 @@
 #import "TRBattery.h"
+#import "TRMonitor.h"
 
 #import <dlfcn.h>
 #import <mach/mach.h>
@@ -327,8 +328,8 @@ NSString *TRMonitorVerdict(NSDictionary *s)
 		return @"监控预览：不触发（电流读数缺失）";
 
 	long mA = labs((long)[cur integerValue]);
-	if (mA >= 50)
-		return [NSString stringWithFormat:@"监控预览：不触发（电流 %ldmA 不为 0）", mA];
+	if (mA >= TRMON_CURRENT_MA)
+		return [NSString stringWithFormat:@"监控预览：不触发（电流 %ldmA ≥ %dmA）", mA, TRMON_CURRENT_MA];
 
 	NSNumber *pct = s[@"percent"];
 	if (pct && [pct integerValue] >= 100)
@@ -340,10 +341,10 @@ NSString *TRMonitorVerdict(NSDictionary *s)
 		return @"监控预览：不触发（已达满容量）";
 
 	NSNumber *t = s[@"tempC"];
-	if (t && ([t doubleValue] < 0.0 || [t doubleValue] > 45.0))
-		return [NSString stringWithFormat:@"监控预览：不触发（温度 %.1f℃ 超出 0–45℃）", [t doubleValue]];
+	if (t && ([t doubleValue] < TRMON_TEMP_MIN_C || [t doubleValue] > TRMON_TEMP_MAX_C))
+		return [NSString stringWithFormat:@"监控预览：不触发（温度 %.1f℃ 超出 %d–%d℃）", [t doubleValue], TRMON_TEMP_MIN_C, TRMON_TEMP_MAX_C];
 
-	return @"监控预览：✅ 条件成立（连续 5 分钟都这样才会重启）";
+	return [NSString stringWithFormat:@"监控预览：✅ 条件成立（连续 %ld 分钟都这样才会重启）", (long)TRMonitorStuckMinutes()];
 }
 
 NSString *TRBatteryLine(NSDictionary *s)

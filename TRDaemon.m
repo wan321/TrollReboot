@@ -1,6 +1,7 @@
 #import "TRDaemon.h"
 #import "TRRootOps.h"
 #import "TRBattery.h"
+#import "TRMonitor.h"
 
 #include <spawn.h>
 #include <sys/wait.h>
@@ -11,6 +12,7 @@
 #include <netinet/in.h>
 #include <arpa/inet.h>
 #include <unistd.h>
+#include <math.h>
 #include <fcntl.h>
 #include <errno.h>
 #include <string.h>
@@ -276,10 +278,217 @@ static NSString *TRBatteryReadIsolated(void)
 	return TRBatteryReadIsolatedWithFormat(NO);
 }
 
+#pragma mark - v3.5-mon：充电卡死自动重启（条件写死，只开放分钟数）
+
+static double gMonStuckSec = 0;
+static NSString *gMonNote = @"未开始";
+static pthread_mutex_t gMonLock = PTHREAD_MUTEX_INITIALIZER;
+
+static void TRMonSetNote(NSString *note)
+{
+	pthread_mutex_lock(&gMonLock);
+	gMonNote = [note copy];
+	pthread_mutex_unlock(&gMonLock);
+}
+
+static NSDictionary *TRMonLive(void)
+{
+	pthread_mutex_lock(&gMonLock);
+	double stuck = gMonStuckSec;
+	NSString *note = gMonNote ?: @"";
+	pthread_mutex_unlock(&gMonLock);
+	return @{ @"stuckSec" : @(stuck), @"note" : note };
+}
+
+static void *TRMonitorThread(void *arg)
+{
+	(void)arg;
+
+	for (;;)
+	{
+		@autoreleasepool
+		{
+			NSInteger minutes = TRMonitorStuckMinutes();
+			double need = (double)minutes * 60.0;
+
+			NSString *raw = TRBatteryReadIsolatedWithFormat(YES);
+			NSDictionary *sample = nil;
+			if (raw.length > 0)
+			{
+				NSData *d = [raw dataUsingEncoding:NSUTF8StringEncoding];
+				id o = d.length ? [NSJSONSerialization JSONObjectWithData:d options:0 error:NULL] : nil;
+				if ([o isKindOfClass:[NSDictionary class]])
+					sample = o;
+			}
+
+			if (sample == nil)
+			{
+				pthread_mutex_lock(&gMonLock);
+				gMonStuckSec = 0;
+				pthread_mutex_unlock(&gMonLock);
+				TRMonSetNote(@"读不到电池，本轮清零");
+				sleep(TRMON_SAMPLE_SEC);
+				continue;
+			}
+
+			NSString *reason = nil;
+			BOOL stuck = TRMonitorSampleIsStuck(sample, &reason);
+
+			// 没插充电器：绝不累计
+			if (![sample[@"external"] boolValue])
+			{
+				pthread_mutex_lock(&gMonLock);
+				gMonStuckSec = 0;
+				pthread_mutex_unlock(&gMonLock);
+			}
+			else if (stuck)
+			{
+				pthread_mutex_lock(&gMonLock);
+				gMonStuckSec += TRMON_SAMPLE_SEC;
+				pthread_mutex_unlock(&gMonLock);
+			}
+			else
+			{
+				pthread_mutex_lock(&gMonLock);
+				gMonStuckSec = 0;
+				pthread_mutex_unlock(&gMonLock);
+			}
+
+			NSDictionary *live = TRMonLive();
+			double stuckSec = [live[@"stuckSec"] doubleValue];
+			TRMonSetNote(stuck ? [NSString stringWithFormat:@"卡死样 已累计 %ld 秒 / 需 %ld 秒",
+			                                             (long)stuckSec, (long)need]
+			                   : [NSString stringWithFormat:@"不满足：%@", reason ?: @"?"]);
+
+			if (stuck && stuckSec >= need)
+			{
+				NSDictionary *st = TRMonitorStateLoad();
+				double boot = TRMonitorCurrentBootTime();
+				NSMutableDictionary *st2 = [st mutableCopy];
+
+				if (boot > 0 && fabs([st2[@"bootTS"] doubleValue] - boot) > 1.0)
+				{
+					// 新的一次开机：次数归零，熔断与历史时间戳保留（不会被重启覆盖）
+					st2[@"bootTS"] = @(boot);
+					st2[@"rebootCountBoot"] = @0;
+					TRMonitorStateWrite(st2);
+				}
+
+				NSString *block = TRMonitorSafetyBlock(st2);
+				if (block != nil)
+				{
+					TRMonSetNote([NSString stringWithFormat:@"条件成立但被安全约束挡住：%@", block]);
+					TRAppendLog(@"daemon.log", [NSString stringWithFormat:@"[monitor] 拦下：%@", block]);
+				}
+				else
+				{
+					double now = (double)time(NULL);
+					NSMutableArray *times = [NSMutableArray arrayWithArray:st2[@"rebootTimes"] ?: @[]];
+					[times addObject:@(now)];
+					while (times.count > 32)
+						[times removeObjectAtIndex:0];
+
+					st2[@"lastRebootTS"] = @(now);
+					st2[@"rebootCountBoot"] = @([st2[@"rebootCountBoot"] integerValue] + 1);
+					st2[@"breaker"] = @([st2[@"breaker"] integerValue] + 1);
+					st2[@"rebootTimes"] = times;
+					TRMonitorStateWrite(st2);
+
+					TRAppendLog(@"daemon.log", [NSString stringWithFormat:
+						@"[monitor] ✅ 条件成立（连续 %ld 秒 / 需 %ld 分钟 / 电量 %@%% / 电流 %@mA），执行 reboot(0)",
+						(long)stuckSec, (long)minutes, sample[@"percent"] ?: @"?", sample[@"currentMA"] ?: @"?"]);
+					sleep(1);
+					sync();
+					reboot(0);
+					TRAppendLog(@"daemon.log", [NSString stringWithFormat:@"[monitor] reboot(0) failed errno=%d", errno]);
+				}
+			}
+
+			sleep(TRMON_SAMPLE_SEC);
+		}
+	}
+	return NULL;
+}
+
+static NSString *TRMonitorJSON(void)
+{
+	NSDictionary *live = TRMonLive();
+	NSDictionary *st = TRMonitorStateLoad();
+
+	NSMutableDictionary *out = [NSMutableDictionary dictionary];
+	out[@"ok"] = @YES;
+	out[@"minutes"] = @(TRMonitorStuckMinutes());
+	out[@"stuckSec"] = live[@"stuckSec"] ?: @0;
+	out[@"note"] = live[@"note"] ?: @"";
+	out[@"conditions"] = TRMonitorConditionsText();
+	out[@"state"] = st;
+	out[@"bootTS"] = @(TRMonitorCurrentBootTime());
+
+	NSData *d = [NSJSONSerialization dataWithJSONObject:out options:0 error:NULL];
+	return d ? [[NSString alloc] initWithData:d encoding:NSUTF8StringEncoding]
+	         : @"{\"ok\":false}";
+}
+
+/// /monitor/set?minutes=N —— 唯一可写项
+static NSString *TRMonitorSetMinutes(NSString *query)
+{
+	NSInteger minutes = TRMonitorStuckMinutes();
+
+	NSRange qm = [query rangeOfString:@"minutes="];
+	if (qm.location != NSNotFound)
+		minutes = [[query substringFromIndex:NSMaxRange(qm)] integerValue];
+
+	NSString *detail = nil;
+	BOOL ok = TRMonitorWriteStuckMinutes(minutes, &detail);
+	NSInteger saved = TRMonitorStuckMinutes();
+
+	TRAppendLog(@"daemon.log", [NSString stringWithFormat:@"[monitor] 分钟数改为 %ld（ok=%d %@）",
+	                                                     (long)saved, ok, detail ?: @""]);
+
+	return [NSString stringWithFormat:@"已保存：连续 %ld 分钟算卡死\n%@", (long)saved, TRMonitorConditionsText()];
+}
+
+/// /monitor/reset —— 人工重置熔断与计数（不动分钟数）
+static NSString *TRMonitorReset(void)
+{
+	NSMutableDictionary *st = [TRMonitorStateLoad() mutableCopy];
+	st[@"breaker"] = @0;
+	st[@"lastRebootTS"] = @0;
+	st[@"rebootCountBoot"] = @0;
+	st[@"rebootTimes"] = @[];
+	st[@"bootTS"] = @(TRMonitorCurrentBootTime());
+	TRMonitorStateWrite(st);
+
+	pthread_mutex_lock(&gMonLock);
+	gMonStuckSec = 0;
+	pthread_mutex_unlock(&gMonLock);
+	TRMonSetNote(@"已人工重置");
+
+	TRAppendLog(@"daemon.log", @"[monitor] 已人工重置熔断与计数");
+	return @"已重置（熔断/冷却/计数清零）";
+}
+
 static NSString *TRHandleRequest(NSString *path)
 {
 	TRAppendLog(@"daemon.log", [NSString stringWithFormat:@"request path=%@", path]);
 	TRWriteHeartbeat();
+
+	if ([path hasPrefix:@"/monitor/reset"])
+	{
+		return TRMonitorReset();
+	}
+	if ([path hasPrefix:@"/monitor/set"])
+	{
+		NSString *q = @"";
+		NSRange qm = [path rangeOfString:@"?"];
+		if (qm.location != NSNotFound)
+			q = [path substringFromIndex:NSMaxRange(qm)];
+		return TRMonitorSetMinutes(q);
+	}
+	if ([path hasPrefix:@"/monitor"])
+	{
+		return TRMonitorJSON();
+	}
 
 	if ([path hasPrefix:@"/reboot"])
 	{
@@ -422,6 +631,16 @@ int TRRunDaemon(void)
 		TRAppendLog(@"daemon.log", [NSString stringWithFormat:@"listening on 127.0.0.1:%d", TR_DAEMON_PORT]);
 		TRWriteHeartbeat();
 		pthread_create(&hb, NULL, TRHeartbeatThread, NULL);
+
+		// v3.5-mon：充电卡死监控线程（默认关闭，配置在 monitor.conf）
+		pthread_t mon;
+		if (pthread_create(&mon, NULL, TRMonitorThread, NULL) == 0)
+		{
+			pthread_detach(mon);
+			TRAppendLog(@"daemon.log", [NSString stringWithFormat:@"[monitor] 线程已启动：连续 %ld 分钟｜%@",
+			                                                      (long)TRMonitorStuckMinutes(),
+			                                                      TRMonitorConditionsText()]);
+		}
 
 		for (;;)
 		{

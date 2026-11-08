@@ -5,7 +5,7 @@ include $(THEOS)/makefiles/common.mk
 
 APPLICATION_NAME = TrollReboot
 
-TrollReboot_FILES = main.m AppDelegate.m RootViewController.m TRRootOps.m TRDaemon.m TRBattery.m
+TrollReboot_FILES = main.m AppDelegate.m RootViewController.m TRRootOps.m TRDaemon.m TRBattery.m TRMonitor.m
 TrollReboot_FRAMEWORKS = UIKit Foundation
 TrollReboot_CFLAGS = -fobjc-arc
 TrollReboot_CODESIGN_FLAGS = -Sentitlements.plist

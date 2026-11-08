@@ -1,6 +1,7 @@
 #import "RootViewController.h"
 #import "TRDaemon.h"
 #import "TRBattery.h"
+#import "TRMonitor.h"
 #import "TRRootOps.h"
 
 #import <sys/sysctl.h>
@@ -19,7 +20,7 @@
  * 所有需要 root 的动作都在守护里做，App 只负责显示。
  */
 
-#define TR_BUILD_TAG @"TrollReboot 3.5-dash"
+#define TR_BUILD_TAG @"TrollReboot 3.5-mon"
 
 static NSString *TRDeviceName(void)
 {
@@ -80,6 +81,9 @@ static double TRMemoryUsageMB(void)
 @property (nonatomic, strong) UITextView *logView;
 @property (nonatomic, strong) UIButton *clipboardButton;
 @property (nonatomic, strong) UIButton *rebootButton;
+@property (nonatomic, strong) UIButton *monitorButton;
+@property (nonatomic, assign) NSInteger monitorMinutes;
+@property (nonatomic, copy) NSString *monitorNote;
 
 @property (nonatomic, strong) NSTimer *probeTimer;
 @property (nonatomic, strong) NSMutableArray<NSString *> *logLines;
@@ -127,8 +131,8 @@ static double TRMemoryUsageMB(void)
 	[self.view addSubview:self.uptimeLabel];
 	y += 32;
 
-	CGFloat buttonsH = 44.0 + 8.0;
-	CGFloat logH = 110.0;
+	CGFloat buttonsH = 44.0 + 8.0 + 40.0 + 8.0;   // 两按钮行 + 卡死分钟数行
+	CGFloat logH = 96.0;
 	CGFloat infoH = self.view.bounds.size.height - y - buttonsH - logH - 8 - 20;
 	if (infoH < 200)
 		infoH = 200;
@@ -168,6 +172,19 @@ static double TRMemoryUsageMB(void)
 	[self.view addSubview:self.rebootButton];
 	y += 44 + 8;
 
+	// v3.5-mon：唯一的可调项——连续多少分钟算卡死
+	self.monitorButton = [UIButton buttonWithType:UIButtonTypeSystem];
+	self.monitorButton.frame = CGRectMake(pad, y, w - pad * 2, 40);
+	[self.monitorButton setTitle:@"卡死分钟数：5 分钟（点我修改）" forState:UIControlStateNormal];
+	[self.monitorButton setTitleColor:[UIColor colorWithWhite:0.92 alpha:1.0] forState:UIControlStateNormal];
+	self.monitorButton.titleLabel.font = [UIFont systemFontOfSize:15 weight:UIFontWeightMedium];
+	self.monitorButton.layer.borderColor = [UIColor colorWithWhite:0.45 alpha:1.0].CGColor;
+	self.monitorButton.layer.borderWidth = 1.0;
+	self.monitorButton.layer.cornerRadius = 20;
+	[self.monitorButton addTarget:self action:@selector(monitorTapped) forControlEvents:UIControlEventTouchUpInside];
+	[self.view addSubview:self.monitorButton];
+	y += 40 + 8;
+
 	self.logView = [[UITextView alloc] initWithFrame:CGRectMake(pad, y, w - pad * 2, logH)];
 	self.logView.backgroundColor = [UIColor colorWithWhite:0.09 alpha:1.0];
 	self.logView.textColor = [UIColor colorWithWhite:0.72 alpha:1.0];
@@ -206,6 +223,7 @@ static double TRMemoryUsageMB(void)
 			[s2 appendLog:online ? [NSString stringWithFormat:@"✅ 后台守护在线（rc=%d）", rc]
 			                     : [NSString stringWithFormat:@"⚠️ 守护没起来 rc=%d（看 daemon.log）", rc]];
 			[s2 startProbe];
+			[s2 reloadMonitor];
 		});
 	});
 }
@@ -387,6 +405,113 @@ static double TRMemoryUsageMB(void)
 	// 采样也落盘（fsync），App 被杀也不丢
 	if (tick % 5 == 1)
 		TRProbeLogAppend([NSString stringWithFormat:@"#%ld %@", (long)tick, TRBatteryLine(s)]);
+}
+
+#pragma mark - 卡死分钟数（唯一可配置项）
+
+- (void)reloadMonitor
+{
+	__weak typeof(self) weakSelf = self;
+	dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+		NSString *text = TRDaemonRequest(@"/monitor");
+		NSInteger minutes = 0;
+		NSString *note = @"守护未响应";
+		if ([text hasPrefix:@"{"])
+		{
+			NSDictionary *j = [NSJSONSerialization JSONObjectWithData:[text dataUsingEncoding:NSUTF8StringEncoding]
+			                                                 options:0
+			                                                   error:NULL];
+			if ([j isKindOfClass:[NSDictionary class]])
+			{
+				minutes = [j[@"minutes"] integerValue];
+				NSString *n = j[@"note"];
+				if ([n isKindOfClass:[NSString class]] && n.length > 0)
+					note = n;
+				else
+					note = @"监控运行中";
+			}
+		}
+		if (minutes > 0)
+			TRMonitorSetCachedMinutes(minutes);
+
+		dispatch_async(dispatch_get_main_queue(), ^{
+			RootViewController *s = weakSelf;
+			if (s == nil)
+				return;
+			s.monitorMinutes = minutes;
+			s.monitorNote = note;
+			[s updateMonitorButton];
+			[s appendLog:[NSString stringWithFormat:@"监控：%@（连续 %ld 分钟算卡死）", note, (long)(minutes > 0 ? minutes : TRMonitorStuckMinutes())]];
+		});
+	});
+}
+
+- (void)updateMonitorButton
+{
+	NSInteger m = self.monitorMinutes;
+	if (m <= 0)
+		m = TRMonitorStuckMinutes();
+	NSString *title = [NSString stringWithFormat:@"卡死分钟数：%ld 分钟（点我修改）", (long)m];
+	[self.monitorButton setTitle:title forState:UIControlStateNormal];
+}
+
+- (void)monitorTapped
+{
+	NSInteger cur = self.monitorMinutes;
+	if (cur <= 0)
+		cur = TRMonitorStuckMinutes();
+
+	UIAlertController *ac = [UIAlertController alertControllerWithTitle:@"卡死分钟数"
+	                                                            message:@"连续这么多分钟电流为 0 且满足其它条件才会重启（1–60）"
+	                                                     preferredStyle:UIAlertControllerStyleAlert];
+	[ac addTextFieldWithConfigurationHandler:^(UITextField *tf) {
+		tf.text = [NSString stringWithFormat:@"%ld", (long)cur];
+		tf.keyboardType = UIKeyboardTypeNumberPad;
+		tf.textAlignment = NSTextAlignmentCenter;
+	}];
+	__weak typeof(self) weakSelf = self;
+	[ac addAction:[UIAlertAction actionWithTitle:@"取消" style:UIAlertActionStyleCancel handler:nil]];
+	[ac addAction:[UIAlertAction actionWithTitle:@"保存"
+	                                       style:UIAlertActionStyleDefault
+	                                     handler:^(UIAlertAction *a) {
+		                                     NSString *v = ac.textFields.firstObject.text;
+		                                     [weakSelf saveMinutes:[v integerValue]];
+	                                     }]];
+	[self presentViewController:ac animated:YES completion:nil];
+}
+
+- (void)saveMinutes:(NSInteger)minutes
+{
+	if (minutes < TRMON_MINUTES_MIN)
+		minutes = TRMON_MINUTES_MIN;
+	if (minutes > TRMON_MINUTES_MAX)
+		minutes = TRMON_MINUTES_MAX;
+
+	[self appendLog:[NSString stringWithFormat:@"设置卡死分钟数 → %ld", (long)minutes]];
+	__weak typeof(self) weakSelf = self;
+	dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+		NSString *path = [NSString stringWithFormat:@"/monitor/set?minutes=%ld", (long)minutes];
+		NSString *r = TRDaemonRequest(path);
+		dispatch_async(dispatch_get_main_queue(), ^{
+			RootViewController *s = weakSelf;
+			if (s == nil)
+				return;
+			if ([r hasPrefix:@"{"])
+			{
+				NSDictionary *j = [NSJSONSerialization JSONObjectWithData:[r dataUsingEncoding:NSUTF8StringEncoding]
+				                                                 options:0
+				                                                   error:NULL];
+				if ([j isKindOfClass:[NSDictionary class]])
+					s.monitorMinutes = [j[@"minutes"] integerValue];
+			}
+			if (s.monitorMinutes <= 0)
+				s.monitorMinutes = minutes;
+			TRMonitorSetCachedMinutes(s.monitorMinutes);
+			[s updateMonitorButton];
+			[s appendLog:[NSString stringWithFormat:@"已生效：连续 %ld 分钟卡死才重启", (long)s.monitorMinutes]];
+			[s reloadMonitor];
+		});
+	});
 }
 
 #pragma mark - 按钮
