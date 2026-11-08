@@ -20,7 +20,7 @@
  * 所有需要 root 的动作都在守护里做，App 只负责显示。
  */
 
-#define TR_BUILD_TAG @"TrollReboot 3.5-mon7"
+#define TR_BUILD_TAG @"TrollReboot 3.5-mon8"
 
 static NSString *TRDeviceName(void)
 {
@@ -239,6 +239,7 @@ static double TRMemoryUsageMB(void)
 	self.didAutoStart = YES;
 
 	[self appendLog:@"打开 App：自动检查后台守护…"];
+	[self logSelfEntitlements];
 	__weak typeof(self) weakSelf = self;
 	dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
 		int rc = TREnsureDaemonDetached();
@@ -317,6 +318,19 @@ static double TRMemoryUsageMB(void)
 /// 向守护要一份 JSON 快照；守护是旧版（unknown path）时重启一次再试
 - (NSDictionary *)fetchSnapshot:(NSString **)outNote
 {
+	NSString *why = nil;
+
+	// 第一优先：自己进程内直接读（电池助手同款权限时是可行的），避免守护进程被内核杀
+	if (TRHasIOKitEntitlement())
+	{
+		NSDictionary *direct = TRBatteryRead();
+		if (direct != nil && [direct[@"ok"] boolValue])
+			return direct;
+		why = [NSString stringWithFormat:@"App 内读失败：%@", direct[@"error"] ?: @"(nil)"];
+	}
+	else
+		why = @"App 缺 iokit-user-client-class 权限，只能靠守护";
+
 	NSString *raw = [self rawRequest:@"/batteryjson"];
 	if ([raw isEqualToString:@"unknown path"])
 	{
@@ -327,24 +341,33 @@ static double TRMemoryUsageMB(void)
 	if (raw.length == 0 || [raw isEqualToString:@"unknown path"])
 	{
 		if (outNote)
-			*outNote = raw.length == 0 ? @"守护没响应（连接失败或无内容）" : @"守护是老版本（unknown path）";
+			*outNote = raw.length == 0 ? [NSString stringWithFormat:@"%@；守护也没响应", why]
+			                           : [NSString stringWithFormat:@"%@；守护是老版本", why];
 		return nil;
 	}
 	NSData *data = [raw dataUsingEncoding:NSUTF8StringEncoding];
 	if (data.length == 0)
 	{
 		if (outNote)
-			*outNote = @"编码失败";
+			*outNote = [NSString stringWithFormat:@"%@；守护响应为空", why];
 		return nil;
 	}
 	id obj = [NSJSONSerialization JSONObjectWithData:data options:0 error:NULL];
 	if (![obj isKindOfClass:[NSDictionary class]])
 	{
+		NSString *snippet = raw.length > 60 ? [raw substringToIndex:60] : raw;
 		if (outNote)
-			*outNote = @"守护返回的不是 JSON";
+			*outNote = [NSString stringWithFormat:@"%@；守护返回非 JSON：%@", why, snippet];
 		return nil;
 	}
-	return (NSDictionary *)obj;
+	NSDictionary *dict = (NSDictionary *)obj;
+	if (![dict[@"ok"] boolValue])
+	{
+		if (outNote)
+			*outNote = [NSString stringWithFormat:@"%@；守护读不到：%@", why, dict[@"error"] ?: @"?"];
+		return nil;
+	}
+	return dict;
 }
 
 - (NSString *)rawRequest:(NSString *)path
@@ -674,5 +697,20 @@ static double TRMemoryUsageMB(void)
 	self.logView.text = [self.logLines componentsJoinedByString:@"\n"];
 	[self.logView scrollRangeToVisible:NSMakeRange(self.logView.text.length, 0)];
 }
+
+
+- (void)logSelfEntitlements
+{
+	NSString *sum = TREntitlementsSummary();
+	BOOL has = TRHasIOKitEntitlement();
+	[self appendLog:[NSString stringWithFormat:@"电池权限：iokit-user-client-class=%@（%@）",
+	          has ? @"有" : @"无", has ? @"App 内可直接读电池" : @"只能靠守护读"]];
+	for (NSString *line in [sum componentsSeparatedByString:@"\n"])
+	{
+		if (line.length > 0)
+			[self appendLog:[NSString stringWithFormat:@"  权限 %@", line]];
+	}
+}
+
 
 @end

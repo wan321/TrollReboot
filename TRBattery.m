@@ -530,3 +530,88 @@ NSDictionary *TRPowerSourcesRead(void)
 
 	return out;
 }
+#pragma mark - 权限自查
+
+typedef struct __SecTask *SecTaskRef;
+extern SecTaskRef SecTaskCreateFromSelf(CFAllocatorRef allocator);
+extern CFTypeRef SecTaskCopyValueForEntitlement(SecTaskRef task, CFStringRef entitlement, CFErrorRef *error);
+extern void CFRelease(CFTypeRef cf);
+
+static CFTypeRef TRCopyEntitlement(const char *key)
+{
+	static SecTaskRef sTask = NULL;
+	if (sTask == NULL)
+	{
+		sTask = SecTaskCreateFromSelf(kCFAllocatorDefault);
+		if (sTask == NULL)
+			return NULL;
+	}
+	CFStringRef k = CFStringCreateWithCString(kCFAllocatorDefault, key, kCFStringEncodingUTF8);
+	if (k == NULL)
+		return NULL;
+	CFTypeRef v = SecTaskCopyValueForEntitlement(sTask, k, NULL);
+	CFRelease(k);
+	return v;
+}
+
+BOOL TRHasIOKitEntitlement(void)
+{
+	CFTypeRef v = TRCopyEntitlement("com.apple.security.iokit-user-client-class");
+	if (v == NULL)
+		return NO;
+	BOOL ok = NO;
+	if (CFGetTypeID(v) == CFArrayGetTypeID())
+	{
+		CFArrayRef arr = (CFArrayRef)v;
+		for (CFIndex i = 0; i < CFArrayGetCount(arr); i++)
+		{
+			CFStringRef s = (CFStringRef)CFArrayGetValueAtIndex(arr, i);
+			if (s != NULL && CFGetTypeID(s) == CFStringGetTypeID() && CFStringFind(s, CFSTR("IOPMPowerSourceClient"), 0).location != kCFNotFound)
+			{
+				ok = YES;
+				break;
+			}
+		}
+	}
+	CFRelease(v);
+	return ok;
+}
+
+NSString *TREntitlementsSummary(void)
+{
+	NSMutableString *out = [NSMutableString string];
+	const char *keys[] = { "platform-application", "com.apple.private.security.system-application",
+	                       "com.apple.security.iokit-user-client-class",
+	                       "com.apple.private.security.no-sandbox" };
+	for (int i = 0; i < 4; i++)
+	{
+		CFTypeRef v = TRCopyEntitlement(keys[i]);
+		NSString *name = [NSString stringWithUTF8String:keys[i]];
+		NSString *shortName = [name stringByReplacingOccurrencesOfString:@"com.apple." withString:@""];
+		if (v == NULL)
+			[out appendFormat:@"%@=无\n", shortName];
+		else
+		{
+			NSString *desc = nil;
+			if (CFGetTypeID(v) == CFBooleanGetTypeID())
+				desc = CFBooleanGetValue((CFBooleanRef)v) ? @"有" : @"false";
+			else if (CFGetTypeID(v) == CFArrayGetTypeID())
+			{
+				NSMutableArray *items = [NSMutableArray array];
+				CFArrayRef arr = (CFArrayRef)v;
+				for (CFIndex j = 0; j < CFArrayGetCount(arr); j++)
+				{
+					CFStringRef s = (CFStringRef)CFArrayGetValueAtIndex(arr, j);
+					if (s != NULL && CFGetTypeID(s) == CFStringGetTypeID())
+						[items addObject:[NSString stringWithFormat:@"%@", (__bridge NSString *)s]];
+				}
+				desc = [NSString stringWithFormat:@"[%@]", [items componentsJoinedByString:@","]];
+			}
+			else
+				desc = @"?";
+			[out appendFormat:@"%@=%@\n", shortName, desc];
+			CFRelease(v);
+		}
+	}
+	return out;
+}

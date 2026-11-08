@@ -36,3 +36,10 @@ NSString *TRProbeLogPath(void);
 /// 追加一行到探针日志（带时间戳，立即 fsync）。
 void TRProbeLogAppend(NSString *line);
 
+
+/// 自身进程是否真的带 com.apple.security.iokit-user-client-class（读 IOPMPowerSource 的必备权限）。
+/// 用 SecTask 向内核自查，能区分「权限没被签进去」和「读法不对」。
+BOOL TRHasIOKitEntitlement(void);
+
+/// 打印自身关键 entitlements（platform-application / system-application / iokit-user-client-class）。
+NSString *TREntitlementsSummary(void);
