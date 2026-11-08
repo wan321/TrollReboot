@@ -1,0 +1,55 @@
+BatteryGuard/BGMain.m:274:52: warning: 'keyWindow' is deprecated: first deprecated in iOS 13.0 - Should not be used for applications that support multiple scenes as it returns a key window across all connected scenes [-Wdeprecated-declarations]
+  274 |         UIWindow *key = [UIApplication sharedApplication].keyWindow;
+      |                                                           ^
+/Applications/Xcode_26.6.app/Contents/Developer/Platforms/iPhoneOS.platform/Developer/SDKs/iPhoneOS26.5.sdk/System/Library/Frameworks/UIKit.framework/Headers/UIApplication.h:108:51: note: 'keyWindow' has been explicitly marked deprecated here
+  108 | @property(nullable, nonatomic,readonly) UIWindow *keyWindow API_DEPRECATED("Should not be used for applications that support multiple scenes as it returns a key window across all connected scenes", ios(2.0, 13.0)) API_UNAVAILABLE(visionos, watchos);
+      |                                                   ^
+BatteryGuard/BGMain.m:322:52: warning: 'keyWindow' is deprecated: first deprecated in iOS 13.0 - Should not be used for applications that support multiple scenes as it returns a key window across all connected scenes [-Wdeprecated-declarations]
+  322 |         UIWindow *key = [UIApplication sharedApplication].keyWindow;
+      |                                                           ^
+/Applications/Xcode_26.6.app/Contents/Developer/Platforms/iPhoneOS.platform/Developer/SDKs/iPhoneOS26.5.sdk/System/Library/Frameworks/UIKit.framework/Headers/UIApplication.h:108:51: note: 'keyWindow' has been explicitly marked deprecated here
+  108 | @property(nullable, nonatomic,readonly) UIWindow *keyWindow API_DEPRECATED("Should not be used for applications that support multiple scenes as it returns a key window across all connected scenes", ios(2.0, 13.0)) API_UNAVAILABLE(visionos, watchos);
+      |                                                   ^
+BatteryGuard/BGMain.m:699:52: warning: 'keyWindow' is deprecated: first deprecated in iOS 13.0 - Should not be used for applications that support multiple scenes as it returns a key window across all connected scenes [-Wdeprecated-declarations]
+  699 |         UIWindow *key = [UIApplication sharedApplication].keyWindow;
+      |                                                           ^
+/Applications/Xcode_26.6.app/Contents/Developer/Platforms/iPhoneOS.platform/Developer/SDKs/iPhoneOS26.5.sdk/System/Library/Frameworks/UIKit.framework/Headers/UIApplication.h:108:51: note: 'keyWindow' has been explicitly marked deprecated here
+  108 | @property(nullable, nonatomic,readonly) UIWindow *keyWindow API_DEPRECATED("Should not be used for applications that support multiple scenes as it returns a key window across all connected scenes", ios(2.0, 13.0)) API_UNAVAILABLE(visionos, watchos);
+      |                                                   ^
+BatteryGuard/BGMain.m:749:28: error: no known class method for selector 'actionWithHandler:forControlEvents:'
+  749 |         [save addAction:[UIAction actionWithHandler:^(__kindof UIAction *a) {
+      |                                   ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+  750 |                 NSInteger want = [weakField.text integerValue];
+      |                 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+  751 |                 NSString *detail = nil;
+      |                 ~~~~~~~~~~~~~~~~~~~~~~~
+  752 |                 BOOL ok = TRMonitorWriteStuckMinutes(want, &detail);
+      |                 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+  753 |                 BGLog([NSString stringWithFormat:@"[ui] 保存分钟数=%ld ok=%d detail=%@", (long)want, ok, detail ?: @"-"]);
+      |                 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+  754 |                 [weakSave setTitle:(ok ? @"已存" : @"失败") forState:UIControlStateNormal];
+      |                 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+  755 |                 dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+      |                 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+  756 |                         [weakSave setTitle:@"保存" forState:UIControlStateNormal];
+      |                         ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+  757 |                 });
+      |                 ~~~
+  758 |         } forControlEvents:UIControlEventTouchUpInside];
+      |         ~~~~~~~~~~~~~~~~~~
+BatteryGuard/BGMain.m:758:49: error: expected ']'
+  758 |         } forControlEvents:UIControlEventTouchUpInside];
+      |                                                        ^
+BatteryGuard/BGMain.m:768:33: error: no known class method for selector 'actionWithHandler:forControlEvents:'
+  768 |         [rebootBtn addAction:[UIAction actionWithHandler:^(__kindof UIAction *a) {
+      |                                        ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+  769 |                 BGLog(@"[ui] 用户点击「立即重启」");
+      |                 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+  770 |                 BGDoReboot(@"用户手动");
+      |                 ~~~~~~~~~~~~~~~~~~~~~~~~
+  771 |         } forControlEvents:UIControlEventTouchUpInside];
+      |         ~~~~~~~~~~~~~~~~~~
+BatteryGuard/BGMain.m:771:49: error: expected ']'
+  771 |         } forControlEvents:UIControlEventTouchUpInside];
+      |                                                        ^
+3 warnings and 4 errors generated.
