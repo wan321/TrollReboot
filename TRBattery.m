@@ -127,8 +127,9 @@ static NSMutableDictionary *TRReadViaLinked(NSString **errOut)
 	{
 		CFMutableDictionaryRef matching = IOServiceMatching(TRServiceNames[i]);
 		if (matching == NULL) { [errs appendFormat:@"%s:matching=NULL ", TRServiceNames[i]]; continue; }
+		// IOServiceGetMatchingService 的参数带 CF_RELEASES_ARGUMENT：会消费 matching 的一份引用，
+		// 调用后不能再 CFRelease，否则过度释放（我们之前就是在这里把读电池的进程搞崩的）
 		TRIOService svc = IOServiceGetMatchingService(mp, matching);
-		CFRelease(matching);
 		if (svc == 0) { [errs appendFormat:@"%s:service=0 ", TRServiceNames[i]]; continue; }
 		CFMutableDictionaryRef props = NULL;
 		kr = IORegistryEntryCreateCFProperties(svc, &props, kCFAllocatorDefault, 0);
@@ -257,8 +258,8 @@ NSDictionary *TRBatteryRead(void)
 		{
 			CFMutableDictionaryRef matching = gServiceMatching(TRServiceNames[i]);
 			if (matching == NULL) continue;
+			// 同上：matching 被 IOServiceGetMatchingService 消费，不能再释放
 			io_service_t service = gGetMatchingService(masterPort, matching);
-			CFRelease(matching);
 			if (service == 0) continue;
 			CFMutableDictionaryRef props = NULL;
 			kern_return_t kr = gCreateCFProperties(service, &props, kCFAllocatorDefault, 0);

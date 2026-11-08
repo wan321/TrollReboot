@@ -191,7 +191,7 @@ jobs:
           grep -q 'IOMasterPort' /tmp/strings.txt || { echo "ERROR: IOMasterPort symbol missing"; exit 1; }
           grep -q -- '--daemon-restart' /tmp/strings.txt || { echo "ERROR: --daemon-restart arg missing"; exit 1; }
           grep -q -- '/batteryjson' /tmp/strings.txt || { echo "ERROR: /batteryjson endpoint missing"; exit 1; }
-          grep -q 'TrollReboot 3.5-mon4-io' /tmp/strings.txt || { echo "ERROR: build tag missing"; exit 1; }
+          grep -q 'TrollReboot 3.5-mon4-io2' /tmp/strings.txt || { echo "ERROR: build tag missing"; exit 1; }
           grep -q 'hw.machine' /tmp/strings.txt || { echo "ERROR: hw.machine sysctl missing"; exit 1; }
           grep -q 'kern.boottime' /tmp/strings.txt || { echo "ERROR: kern.boottime sysctl missing"; exit 1; }
           grep -q -- '/monitor/set' /tmp/strings.txt || { echo "ERROR: /monitor/set endpoint missing"; exit 1; }
@@ -199,9 +199,11 @@ jobs:
           grep -q 'stuckMinutes' /tmp/strings.txt || { echo "ERROR: stuckMinutes key missing"; exit 1; }
           grep -q 'monitor.conf' /tmp/strings.txt || { echo "ERROR: monitor.conf path missing"; exit 1; }
           grep -q 'monitor.state' /tmp/strings.txt || { echo "ERROR: monitor.state path missing"; exit 1; }
-          grep -q 'TrollReboot 3.5-mon4-io' /tmp/strings.txt || { echo "ERROR: build tag 3.5-mon missing"; exit 1; }
+          grep -q 'TrollReboot 3.5-mon4-io2' /tmp/strings.txt || { echo "ERROR: build tag 3.5-mon missing"; exit 1; }
           grep -q 'IOPMPowerSource' /tmp/strings.txt || { echo "WARN: IOPMPowerSource string missing"; }
           grep -q 'IOPSCopyPowerSourcesInfo' /tmp/strings.txt || { echo "WARN: IOPS string missing"; }
+          # 回归断言：IOServiceGetMatchingService 已消费 matching，源码里不允许再 release
+          if grep -q 'CFRelease(matching)' TRBattery.m; then echo "ERROR: CFRelease(matching) 又回来了（双重释放）"; exit 1; fi
           echo "OK: 守护进程入口字符串齐全"
 
           mkdir -p dist
