@@ -237,4 +237,5 @@ jobs:
           git add -f dist/TrollReboot.tipa
           if git diff --cached --quiet; then echo 'dist 无变化，跳过提交'; exit 0; fi
           git commit -m "ci: publish tipa [skip ci]"
-          git push
+          git pull --rebase -q origin "$GITHUB_REF_NAME" || true
+          git push || echo "push failed (non-fatal)"
