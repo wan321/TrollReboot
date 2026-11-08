@@ -298,6 +298,39 @@ static NSString *TRDaemonPlistText(NSString *exe)
 		@"</dict></plist>\n", TR_DAEMON_LABEL, exe, TRPath(@"stdout.log"), TRPath(@"stderr.log")];
 }
 
+#pragma mark - 诊断：挂载表 + 可写探测
+
+NSString *TRPathsProbe(void)
+{
+	NSMutableString *m = [NSMutableString string];
+
+	struct statfs *mnts = NULL;
+	int n = getmntinfo(&mnts, MNT_NOWAIT);
+	[m appendString:@"--- 挂载点 ---\n"];
+	for (int i = 0; i < n && i < 14; i++)
+	{
+		[m appendFormat:@"%s  (%s)  flags=0x%x%s\n",
+			mnts[i].f_mntonname, mnts[i].f_fstypename, mnts[i].f_flags,
+			(mnts[i].f_flags & MNT_RDONLY) ? "  [只读]" : ""];
+	}
+
+	[m appendString:@"--- 可写探测 ---\n"];
+	NSArray *paths = @[@"/Library/LaunchDaemons", @"/System/Library/LaunchDaemons",
+	                   @"/usr/libexec", @"/Applications", @"/var/mobile/Library/Caches"];
+	for (NSString *dir in paths)
+	{
+		BOOL isDir = NO;
+		BOOL exist = [[NSFileManager defaultManager] fileExistsAtPath:dir isDirectory:&isDir];
+		NSString *probe = [dir stringByAppendingPathComponent:@".trprobe"];
+		errno = 0;
+		BOOL ok = [@"x" writeToFile:probe atomically:NO encoding:NSUTF8StringEncoding error:nil];
+		int e = errno;
+		if (ok) [[NSFileManager defaultManager] removeItemAtPath:probe error:nil];
+		[m appendFormat:@"%@  存在=%@  可写=%@  errno=%d(%s)\n",
+			dir, exist ? @"Y" : @"N", ok ? @"Y" : @"N", e, strerror(e)];
+	}
+	return m;
+}
 #pragma mark - 安装 / 卸载
 
 static BOOL TRWritePlist(NSString *plist, NSString *path, NSString **detail)
@@ -416,14 +449,18 @@ int TRInstallDaemon(void)
 			return 2;
 		}
 
+		TRAppendLog(@"install.log", TRPathsProbe());
+
 		NSString *binDetail = nil;
 		NSString *bin = TRInstallBinaryCopy(&binDetail);
 		TRAppendLog(@"install.log", binDetail ?: @"");
 		if (!bin)
 		{
-			TRAppendLog(@"install.log", @"❌ 守护二进制没能放到 /usr/libexec，安装无法继续");
-			return 3;
+			bin = [NSBundle mainBundle].executablePath;
+			TRAppendLog(@"install.log", [NSString stringWithFormat:
+				@"⚠️ 复制到 /usr/libexec 失败，退回用 App 自身路径：%@", bin]);
 		}
+		if (bin.length == 0) return 3;
 
 		NSFileManager *fm = [NSFileManager defaultManager];
 		BOOL hasLaunchctl = [fm fileExistsAtPath:@TR_LAUNCHCTL];
@@ -494,7 +531,13 @@ int TRInstallDaemonHard(void)
 		NSString *binDetail = nil;
 		NSString *bin = TRInstallBinaryCopy(&binDetail);
 		TRAppendLog(@"install.log", binDetail ?: @"");
-		if (!bin) return 3;
+		if (!bin)
+		{
+			bin = [NSBundle mainBundle].executablePath;
+			TRAppendLog(@"install.log", [NSString stringWithFormat:
+				@"⚠️ 复制到 /usr/libexec 失败，退回用 App 自身路径：%@", bin]);
+		}
+		if (bin.length == 0) return 3;
 
 		NSString *plist = TRDaemonPlistText(bin);
 		NSString *detail = nil;

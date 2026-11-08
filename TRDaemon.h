@@ -33,3 +33,6 @@ int TRInstallDaemonViaRoot(void);
 
 /// 以 root 运行自身 --uninstall-daemon 卸载 launchd 常驻任务
 int TRUninstallDaemonViaRoot(void);
+
+/// 诊断：挂载表 + 关键路径可写探测
+NSString *TRPathsProbe(void);
