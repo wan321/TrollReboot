@@ -108,7 +108,14 @@ extern CFTypeRef IOPSCopyPowerSourcesInfo(void);
 extern CFArrayRef IOPSCopyPowerSourcesList(CFTypeRef blob);
 extern CFDictionaryRef IOPSGetPowerSourceDescription(CFTypeRef blob, CFTypeRef ps);
 
-static const char *TRServiceNames[] = { "IOPMPowerSource", "AppleSmartBattery", "AppleARMPMUCharger" };
+/*
+ * v3.5-mon4-io4：私有读取只碰 IOPMPowerSource 这一个服务。
+ * 依据（反编译「电池助手 1.0.7」）：它的 iokit-user-client-class 只授
+ * IOPMPowerSourceClient，二进制里也只 IOServiceMatching("IOPMPowerSource")；
+ * AppleSmartBattery / AppleARMPMUCharger 是另外的 IOUserClient 类，没有对应授权时
+ * 匹配返回 0，权限更差时会把进程直接打崩（mon9 之前踩过）。所以这里收敛，不再试。
+ */
+static const char *TRServiceNames[] = { "IOPMPowerSource" };
 
 static NSMutableDictionary *TRReadViaLinked(NSString **errOut)
 {
@@ -142,7 +149,8 @@ static NSMutableDictionary *TRReadViaLinked(NSString **errOut)
 
 	if (merged.count == 0)
 	{
-		if (errOut) *errOut = errs.length ? errs : @"直连 IOKit 读不到";
+		NSString *extra = @"（只探测已授权的 IOPMPowerSource；其它 IOUserClient 服务类无权访问，试了会崩）";
+		if (errOut) *errOut = errs.length ? [errs stringByAppendingString:extra] : [@"直连 IOKit 读不到" stringByAppendingString:extra];
 		return nil;
 	}
 	return merged;
@@ -310,11 +318,12 @@ NSDictionary *TRBatteryRead(void)
 		return out;
 	}
 
-	NSDictionary *p = merged[@"IOPMPowerSource"] ?: merged[@"AppleSmartBattery"] ?: merged[@"AppleARMPMUCharger"];
-	NSDictionary *alt = merged[@"AppleARMPMUCharger"] ?: merged[@"AppleSmartBattery"] ?: merged[@"IOPMPowerSource"];
+	NSDictionary *p = merged[@"IOPMPowerSource"];
+	NSDictionary *alt = p;
 
 	out[@"ok"] = @YES;
 	out[@"properties"] = p;
+	out[@"source"] = @"IOPMPowerSource";
 	out[@"services"] = [merged.allKeys componentsJoinedByString:@","];
 	out[@"diagLink"] = diagLink;
 	out[@"diagDlopen"] = diagDlopen;
@@ -358,6 +367,15 @@ NSDictionary *TRBatteryRead(void)
 	if (rawMax)
 		out[@"rawMaxCapacity"] = rawMax;
 
+	// 「电池助手」用的键里有 Serial；面板不显示，但诊断里带上便于确认读的是同一颗电池
+	id serial = p[@"Serial"];
+	if ([serial isKindOfClass:[NSString class]] && [(NSString *)serial length] > 0)
+		out[@"serial"] = serial;
+
+	// CurrentCapacity 缺失时按原始容量换算百分比（电池助手同样以 CurrentCapacity 为主）
+	if (out[@"percent"] == nil && raw && rawMax && [rawMax integerValue] > 0)
+		out[@"percent"] = @((double)[raw doubleValue] * 100.0 / (double)[rawMax doubleValue]);
+
 	NSNumber *maxCap = TRNum(p[@"MaxCapacity"]);
 	if (maxCap)
 		out[@"maxCapacity"] = maxCap;
@@ -375,13 +393,14 @@ NSDictionary *TRBatteryRead(void)
 	if (nominal)
 		out[@"nominalChargeCapacity"] = nominal;
 
-	NSNumber *fullCap = rawMax ?: maxCap;
+	// 健康度 = 满容量 / 设计容量。电池助手的口径是以 AppleRawMaxCapacity 除以 DesignCapacity；
+	// AppleRawMaxCapacity 缺失时才依次退 MaxCapacity、NominalChargeCapacity。
+	NSNumber *fullCap = rawMax ?: maxCap ?: nominal;
 	if (design && fullCap && [design integerValue] > 0)
 	{
 		double h = [fullCap doubleValue] * 100.0 / [design doubleValue];
-		if (h > 120.0 && maxCap && [design integerValue] > 0)
-			h = [maxCap doubleValue] * 100.0 / [design doubleValue];
 		out[@"healthPercent"] = @(h);
+		out[@"healthBasis"] = rawMax ? @"AppleRawMaxCapacity" : (maxCap ? @"MaxCapacity" : @"NominalChargeCapacity");
 	}
 
 	if (voltage && instant)

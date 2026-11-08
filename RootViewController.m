@@ -20,7 +20,7 @@
  * 所有需要 root 的动作都在守护里做，App 只负责显示。
  */
 
-#define TR_BUILD_TAG @"TrollReboot 3.5-mon4-io3"
+#define TR_BUILD_TAG @"TrollReboot 3.5-mon4-io4"
 
 static NSString *TRDeviceName(void)
 {
@@ -360,7 +360,7 @@ static double TRMemoryUsageMB(void)
 	NSNumber *design = s[@"designCapacity"];
 	NSNumber *rawCap = s[@"rawCapacity"];
 	NSNumber *rawMax = s[@"rawMaxCapacity"];
-	NSNumber *full = s[@"maxCapacity"];
+	NSNumber *full = s[@"maxCapacity"] ?: s[@"rawMaxCapacity"];
 	NSNumber *power = s[@"powerW"];
 
 	// 大电池图标随电量变化

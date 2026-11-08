@@ -182,16 +182,24 @@ jobs:
           grep -q -- '/System/Library/LaunchDaemons' /tmp/strings.txt || { echo "ERROR: /System plist path missing"; exit 1; }
           grep -q '8899' /tmp/strings.txt || echo "WARN: port 8899 literal not found (可能是分段字符串)"
           grep -q 'launchctl' /tmp/strings.txt || echo "WARN: launchctl literal not found"
-          grep -q 'AppleSmartBattery' /tmp/strings.txt || { echo "ERROR: AppleSmartBattery service name missing"; exit 1; }
+          grep -q 'AppleSmartBattery' /tmp/strings.txt || echo "OK: 已不访问 AppleSmartBattery（符合预期）"
           grep -q 'InstantAmperage' /tmp/strings.txt || { echo "ERROR: InstantAmperage key missing"; exit 1; }
+          # 回归断言（对齐「电池助手 1.0.7」）：只允许探测授权内的 IOPMPowerSource，
+          # 不准再出现 AppleSmartBattery / AppleARMPMUCharger（无 IOUserClient 授权，会崩）
+          if grep -Eq 'AppleSmartBattery|AppleARMPMUCharger' /tmp/strings.txt; then
+            echo "ERROR: 二进制里又出现未授权的 IOUserClient 服务名"
+            exit 1
+          fi
+          grep -q 'IOPMPowerSource' /tmp/strings.txt || { echo "ERROR: IOPMPowerSource service name missing"; exit 1; }
+          grep -q 'healthBasis' /tmp/strings.txt || { echo "ERROR: healthBasis key missing"; exit 1; }
           grep -q 'charge-probe.log' /tmp/strings.txt || { echo "ERROR: charge-probe.log path missing"; exit 1; }
           grep -q 'IOKit.framework' /tmp/strings.txt || { echo "ERROR: IOKit dlopen path missing"; exit 1; }
           grep -q '/battery' /tmp/strings.txt || { echo "ERROR: /battery endpoint missing"; exit 1; }
-          grep -q 'AppleARMPMUCharger' /tmp/strings.txt || { echo "ERROR: AppleARMPMUCharger service missing"; exit 1; }
+          grep -q 'AppleARMPMUCharger' /tmp/strings.txt || echo "OK: 已不访问 AppleARMPMUCharger（符合预期）"
           grep -q 'IOMasterPort' /tmp/strings.txt || { echo "ERROR: IOMasterPort symbol missing"; exit 1; }
           grep -q -- '--daemon-restart' /tmp/strings.txt || { echo "ERROR: --daemon-restart arg missing"; exit 1; }
           grep -q -- '/batteryjson' /tmp/strings.txt || { echo "ERROR: /batteryjson endpoint missing"; exit 1; }
-          grep -q 'TrollReboot 3.5-mon4-io3' /tmp/strings.txt || { echo "ERROR: build tag missing"; exit 1; }
+          grep -q 'TrollReboot 3.5-mon4-io4' /tmp/strings.txt || { echo "ERROR: build tag missing"; exit 1; }
           grep -q 'hw.machine' /tmp/strings.txt || { echo "ERROR: hw.machine sysctl missing"; exit 1; }
           grep -q 'kern.boottime' /tmp/strings.txt || { echo "ERROR: kern.boottime sysctl missing"; exit 1; }
           grep -q -- '/monitor/set' /tmp/strings.txt || { echo "ERROR: /monitor/set endpoint missing"; exit 1; }
@@ -199,7 +207,7 @@ jobs:
           grep -q 'stuckMinutes' /tmp/strings.txt || { echo "ERROR: stuckMinutes key missing"; exit 1; }
           grep -q 'monitor.conf' /tmp/strings.txt || { echo "ERROR: monitor.conf path missing"; exit 1; }
           grep -q 'monitor.state' /tmp/strings.txt || { echo "ERROR: monitor.state path missing"; exit 1; }
-          grep -q 'TrollReboot 3.5-mon4-io3' /tmp/strings.txt || { echo "ERROR: build tag 3.5-mon missing"; exit 1; }
+          grep -q 'TrollReboot 3.5-mon4-io4' /tmp/strings.txt || { echo "ERROR: build tag 3.5-mon missing"; exit 1; }
           grep -q 'IOPMPowerSource' /tmp/strings.txt || { echo "WARN: IOPMPowerSource string missing"; }
           grep -q 'IOPSCopyPowerSourcesInfo' /tmp/strings.txt || { echo "WARN: IOPS string missing"; }
           grep -q 'diagLink' /tmp/strings.txt || { echo "ERROR: diagLink key missing"; exit 1; }

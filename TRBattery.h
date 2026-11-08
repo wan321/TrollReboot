@@ -3,7 +3,7 @@
 /*
  * v3.5-probe 只读电池探针。
  *
- * 目的：在真机上验证私有 IOKit（AppleSmartBattery）能否读到
+ * 目的：在真机上验证私有 IOKit（IOPMPowerSource）能否读到
  *   - 外部电源：ExternalConnected
  *   - 是否在充：IsCharging / FullyCharged
  *   - 电流（mA）：InstantAmperage / Amperage
