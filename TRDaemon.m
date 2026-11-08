@@ -814,7 +814,7 @@ int TRLaunchDaemonDetached(void)
 /// v3.6：杀掉旧版守护并用新代码重起（端口被旧进程占着时的自救）
 int TRRestartDaemonDetached(void)
 {
-	return TRSpawnSelf(@["--daemon-restart"], YES);
+	return TRSpawnSelf(@[@"--daemon-restart"], YES);
 }
 
 int TRInstallDaemonViaRoot(void)
