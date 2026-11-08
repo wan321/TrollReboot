@@ -183,14 +183,14 @@ static void TRRespond(int fd, int code, NSString *body)
 /// v3.5-probe3：把私有 IOKit 读电池放进 fork 出来的子进程里做。
 /// 这样即使 IOKit 把进程搞崩，死的也只是子进程，守护还活着，而且能报出信号号。
 
-// mon9: 私有 IOKit 在 iOS 14.4 上会杀掉读它的进程。连续失败 3 次就永久停用，
-// 之后只用公开电源 API（不崩），避免每秒 fork 一个必死的子进程。
+// mon10: 私有 IOKit 读电流是硬需求，不能因为失败就永久放弃；改为失败后节流（60 秒才重试一次），
+// 成功一次就恢复每秒采样，避免每次采样都 fork 一个必死的子进程把守护拖垮。
 static int gPrivateFailCount = 0;
-static BOOL gPrivateDisabled = NO;
+static BOOL gPrivateThrottled = NO;
+static time_t gPrivateNextTry = 0;
 
-static NSString *TRBatteryReadIsolatedWithFormat(BOOL asJSON)
 {
-	if (gPrivateDisabled)
+	if (gPrivateThrottled && time(NULL) < gPrivateNextTry)
 		return @"";
 
 	int fds[2];
@@ -272,20 +272,27 @@ static NSString *TRBatteryReadIsolatedWithFormat(BOOL asJSON)
 	if (acc.length > 0)
 	{
 		NSString *s = [[NSString alloc] initWithData:acc encoding:NSUTF8StringEncoding];
-		if (s.length == 0)
+		if (s.length > 0)
 		{
-			gPrivateFailCount += 1;
-			return @"❌ 读电池返回空";
+			gPrivateFailCount = 0;
+			gPrivateThrottled = NO;
+			gPrivateNextTry = 0;
+			return s;
 		}
-		gPrivateFailCount = 0;
-		return s;
+		gPrivateFailCount += 1;
+		return @"❌ 读电池返回空";
 	}
+
 	gPrivateFailCount += 1;
-	if (gPrivateFailCount >= 3 && !gPrivateDisabled)
+	if (!gPrivateThrottled)
 	{
-		gPrivateDisabled = YES;
-		TRAppendLog(@"daemon.log", @"[battery] 私有 IOKit 连续 3 次失败（读它的进程被内核杀），已停用；改用公开电源 API");
+		gPrivateThrottled = YES;
+		gPrivateNextTry = time(NULL) + 60;
+		TRAppendLog(@"daemon.log", @"[battery] 私有 IOKit 读失败，60 秒后重试（电流是硬需求，不放弃）");
 	}
+	else
+		gPrivateNextTry = time(NULL) + 60;
+
 	if (timedOut)
 		return @"❌ 读电池超时（>3s，私有 IOKit 卡住）";
 	if (WIFSIGNALED(status))
