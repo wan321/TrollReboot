@@ -131,6 +131,10 @@ jobs:
           grep -q 'AppleARMPMUCharger' /tmp/strings.txt || { echo "ERROR: AppleARMPMUCharger service missing"; exit 1; }
           grep -q 'IOMasterPort' /tmp/strings.txt || { echo "ERROR: IOMasterPort symbol missing"; exit 1; }
           grep -q -- '--daemon-restart' /tmp/strings.txt || { echo "ERROR: --daemon-restart arg missing"; exit 1; }
+      grep -q -- '/batteryjson' /tmp/strings.txt || { echo "ERROR: /batteryjson endpoint missing"; exit 1; }
+      grep -q 'TrollReboot 3.5-dash' /tmp/strings.txt || { echo "ERROR: build tag missing"; exit 1; }
+      grep -q 'hw.machine' /tmp/strings.txt || { echo "ERROR: hw.machine sysctl missing"; exit 1; }
+      grep -q 'kern.boottime' /tmp/strings.txt || { echo "ERROR: kern.boottime sysctl missing"; exit 1; }
           echo "OK: 守护进程入口字符串齐全"
 
           mkdir -p dist

@@ -250,6 +250,31 @@ NSDictionary *TRBatteryRead(void)
 	if (maxCap)
 		out[@"maxCapacity"] = maxCap;
 
+	// 仪表盘需要的一组：健康度 / 循环次数 / 设计容量
+	NSNumber *design = TRNum(p[@"DesignCapacity"]);
+	if (design)
+		out[@"designCapacity"] = design;
+
+	NSNumber *cycle = TRNum(p[@"CycleCount"]);
+	if (cycle)
+		out[@"cycleCount"] = cycle;
+
+	NSNumber *nominal = TRNum(p[@"NominalChargeCapacity"]);
+	if (nominal)
+		out[@"nominalChargeCapacity"] = nominal;
+
+	NSNumber *fullCap = rawMax ?: maxCap;
+	if (design && fullCap && [design integerValue] > 0)
+	{
+		double h = [fullCap doubleValue] * 100.0 / [design doubleValue];
+		if (h > 120.0 && maxCap && [design integerValue] > 0)
+			h = [maxCap doubleValue] * 100.0 / [design doubleValue];
+		out[@"healthPercent"] = @(h);
+	}
+
+	if (voltage && instant)
+		out[@"powerW"] = @(fabs([voltage doubleValue] * [instant doubleValue]) / 1000000.0);
+
 	out[@"external"] = @([p[@"ExternalConnected"] boolValue]);
 	out[@"charging"] = @([p[@"IsCharging"] boolValue]);
 	out[@"fullyCharged"] = @([p[@"FullyCharged"] boolValue]);

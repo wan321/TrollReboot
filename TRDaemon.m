@@ -180,7 +180,8 @@ static void TRRespond(int fd, int code, NSString *body)
 
 /// v3.5-probe3：把私有 IOKit 读电池放进 fork 出来的子进程里做。
 /// 这样即使 IOKit 把进程搞崩，死的也只是子进程，守护还活着，而且能报出信号号。
-static NSString *TRBatteryReadIsolated(void)
+/// asJSON=YES 时返回 JSON（给仪表盘用），否则返回一行紧凑文本。
+static NSString *TRBatteryReadIsolatedWithFormat(BOOL asJSON)
 {
 	int fds[2];
 	if (pipe(fds) != 0)
@@ -192,8 +193,24 @@ static NSString *TRBatteryReadIsolated(void)
 		close(fds[0]);
 		@autoreleasepool
 		{
-			NSString *line = TRBatteryLine(TRBatteryRead());
-			NSData *d = [line dataUsingEncoding:NSUTF8StringEncoding];
+			NSDictionary *sample = TRBatteryRead();
+			NSString *payload = nil;
+			if (asJSON)
+			{
+				// properties 里是 IOKit 原始对象（可能有 NSData），不能直接进 JSON
+				NSMutableDictionary *safe = [NSMutableDictionary dictionaryWithDictionary:sample ?: @{}];
+				[safe removeObjectForKey:@"properties"];
+				NSData *jd = [NSJSONSerialization dataWithJSONObject:safe options:0 error:NULL];
+				payload = jd ? [[NSString alloc] initWithData:jd encoding:NSUTF8StringEncoding] : nil;
+				if (payload == nil)
+					payload = @"{\"ok\":false,\"error\":\"json encode failed\"}";
+			}
+			else
+			{
+				payload = TRBatteryLine(sample);
+			}
+
+			NSData *d = [payload dataUsingEncoding:NSUTF8StringEncoding];
 			if (d.length > 0)
 				(void)write(fds[1], d.bytes, d.length);
 		}
@@ -254,6 +271,11 @@ static NSString *TRBatteryReadIsolated(void)
 	return [NSString stringWithFormat:@"❌ 读电池无输出（子进程 exit=%d）", WEXITSTATUS(status)];
 }
 
+static NSString *TRBatteryReadIsolated(void)
+{
+	return TRBatteryReadIsolatedWithFormat(NO);
+}
+
 static NSString *TRHandleRequest(NSString *path)
 {
 	TRAppendLog(@"daemon.log", [NSString stringWithFormat:@"request path=%@", path]);
@@ -291,6 +313,10 @@ static NSString *TRHandleRequest(NSString *path)
 	{
 		int rc = TRInstallDaemon();
 		return [NSString stringWithFormat:@"install rc=%d euid=%u", rc, geteuid()];
+	}
+	if ([path hasPrefix:@"/batteryjson"])
+	{
+		return TRBatteryReadIsolatedWithFormat(YES);
 	}
 	if ([path hasPrefix:@"/battery"])
 	{

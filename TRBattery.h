@@ -23,6 +23,9 @@ NSString *TRBatteryLine(NSDictionary *sample);
 /// 当前是否"看起来该触发"（插电 + 在充 + 未满 + |电流| < 阈值）。仅用于显示提示，不执行任何动作。
 BOOL TRBatteryLooksStuck(NSDictionary *sample, int currentThresholdMA);
 
+/// 把一次采样按「监控预览」逐条判读，返回一行文本（只判断，不执行任何动作）。
+NSString *TRMonitorVerdict(NSDictionary *sample);
+
 /// 探针日志路径（App Documents/charge-probe.log）
 NSString *TRProbeLogPath(void);
 

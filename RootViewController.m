@@ -1,32 +1,94 @@
 #import "RootViewController.h"
-#import "TRRootOps.h"
 #import "TRDaemon.h"
 #import "TRBattery.h"
+#import "TRRootOps.h"
 
+#import <sys/sysctl.h>
+#import <mach/mach.h>
+#import <mach/mach_host.h>
 #include <unistd.h>
 #include <time.h>
 
+/*
+ * v3.5-dash：主界面改成电池仪表盘。
+ *
+ * 打开 App 就自动做两件事（不再需要点按钮）：
+ *   1) 后台守护不在跑 → 以 root 分离进程拉起（TREnsureDaemonDetached）
+ *   2) 自动开始充电探针（每秒向守护要一次 /batteryjson）
+ *
+ * 所有需要 root 的动作都在守护里做，App 只负责显示。
+ */
+
+#define TR_BUILD_TAG @"TrollReboot 3.5-dash"
+
+static NSString *TRDeviceName(void)
+{
+	char machine[64] = {0};
+	size_t len = sizeof(machine);
+	if (sysctlbyname("hw.machine", machine, &len, NULL, 0) != 0 || machine[0] == 0)
+		return @"iPhone";
+
+	NSString *m = @(machine);
+	if ([m isEqualToString:@"iPhone12,8"])
+		return @"iPhone SE2";
+	if ([m isEqualToString:@"iPhone12,1"])
+		return @"iPhone 11";
+	if ([m isEqualToString:@"iPhone11,2"])
+		return @"iPhone XS";
+
+	return m;
+}
+
+static NSString *TRUptimeText(void)
+{
+	struct timeval boot = {0};
+	size_t len = sizeof(boot);
+	if (sysctlbyname("kern.boottime", &boot, &len, NULL, 0) != 0 || boot.tv_sec == 0)
+		return @"?";
+
+	long long up = (long long)time(NULL) - (long long)boot.tv_sec;
+	if (up < 0)
+		up = 0;
+
+	long days = (long)(up / 86400);
+	long hours = (long)((up % 86400) / 3600);
+	long mins = (long)((up % 3600) / 60);
+	return [NSString stringWithFormat:@"%ld天%ld小时%ld分", days, hours, mins];
+}
+
+static double TRMemoryUsageMB(void)
+{
+	mach_port_t host = mach_host_self();
+	vm_statistics64_data_t vm = {0};
+	mach_msg_type_number_t count = HOST_VM_INFO64_COUNT;
+	if (host_statistics64(host, HOST_VM_INFO64, (host_info64_t)&vm, &count) != KERN_SUCCESS)
+		return -1;
+
+	vm_size_t page = 0;
+	host_page_size(host, &page);
+	double used = ((double)vm.active_count + (double)vm.wire_count +
+	               (double)vm.compressor_page_count) * (double)page;
+	return used / (1024.0 * 1024.0);
+}
+
 @interface RootViewController ()
+
 @property (nonatomic, strong) UILabel *titleLabel;
-@property (nonatomic, strong) UILabel *hintLabel;
-@property (nonatomic, strong) UIButton *daemonButton;
-@property (nonatomic, strong) UIButton *autostartButton;
+@property (nonatomic, strong) UILabel *uptimeLabel;
+@property (nonatomic, strong) UIImageView *batteryIcon;
+@property (nonatomic, strong) UITextView *infoView;
+@property (nonatomic, strong) UITextView *logView;
+@property (nonatomic, strong) UIButton *copyButton;
 @property (nonatomic, strong) UIButton *rebootButton;
-@property (nonatomic, strong) UITextView *statusView;
-@property (nonatomic, assign) BOOL busy;
+
+@property (nonatomic, strong) NSTimer *probeTimer;
+@property (nonatomic, strong) NSMutableArray<NSString *> *logLines;
+@property (nonatomic, assign) NSInteger probeTicks;
+@property (nonatomic, assign) NSInteger failStreak;
 @property (nonatomic, assign) BOOL didAutoStart;
+@property (nonatomic, assign) BOOL busy;
 @property (nonatomic, strong) NSURL *pendingURL;
 
-// v3.5-probe：只读充电探针
-@property (nonatomic, strong) UIButton *probeButton;
-@property (nonatomic, strong) UITextView *probeView;
-@property (nonatomic, strong) NSTimer *probeTimer;
-@property (nonatomic, strong) NSMutableArray<NSString *> *probeLines;
-@property (nonatomic, assign) BOOL probing;
-@property (nonatomic, assign) NSInteger probeTicks;
-@property (nonatomic, assign) NSInteger probeFailStreak;
-@property (nonatomic, assign) BOOL probeRestarted;
-@property (nonatomic, assign) time_t probeStart;
 @end
 
 @implementation RootViewController
@@ -34,232 +96,132 @@
 - (void)viewDidLoad
 {
 	[super viewDidLoad];
-	self.view.backgroundColor = [UIColor systemBackgroundColor];
-	[self buildUI];
-	[self appendLog:[NSString stringWithFormat:@"启动完成 · uid=%u euid=%u", getuid(), geteuid()]];
-}
 
-- (void)buildUI
-{
+	self.view.backgroundColor = [UIColor blackColor];
+	self.logLines = [NSMutableArray array];
+
 	CGFloat w = self.view.bounds.size.width;
 	CGFloat pad = 16.0;
+	CGFloat y = 44.0;
 
-	self.titleLabel = [[UILabel alloc] initWithFrame:CGRectMake(pad, 48, w - pad * 2, 36)];
-	self.titleLabel.text = @"TrollReboot 3.5-probe4";
-	self.titleLabel.font = [UIFont boldSystemFontOfSize:28];
+	self.batteryIcon = [[UIImageView alloc] initWithFrame:CGRectMake((w - 150) / 2.0, y, 150, 70)];
+	self.batteryIcon.contentMode = UIViewContentModeScaleAspectFit;
+	self.batteryIcon.tintColor = [UIColor colorWithRed:0.29 green:0.87 blue:0.31 alpha:1.0];
+	[self.view addSubview:self.batteryIcon];
+	y += 78;
+
+	self.titleLabel = [[UILabel alloc] initWithFrame:CGRectMake(pad, y, w - pad * 2, 26)];
+	self.titleLabel.textAlignment = NSTextAlignmentCenter;
+	self.titleLabel.textColor = [UIColor whiteColor];
+	self.titleLabel.font = [UIFont systemFontOfSize:20 weight:UIFontWeightSemibold];
+	self.titleLabel.text = [NSString stringWithFormat:@"%@ (iOS %@)", TRDeviceName(),
+	                                                     [[UIDevice currentDevice] systemVersion]];
 	[self.view addSubview:self.titleLabel];
+	y += 28;
 
-	self.hintLabel = [[UILabel alloc] initWithFrame:CGRectMake(pad, 84, w - pad * 2, 54)];
-	self.hintLabel.numberOfLines = 0;
-	self.hintLabel.font = [UIFont systemFontOfSize:11];
-	self.hintLabel.textColor = [UIColor secondaryLabelColor];
-	self.hintLabel.text = @"本版只加「充电探针」：每秒读一次电池（私有 IOKit / AppleSmartBattery），只显示不动作，绝不会重启。\n插电、拔电各看几行，确认电流/电压/温度能不能读到、符号正不正。\n探针数据同时写进 Documents/charge-probe.log，可点「复制状态」整段发我。";
-	[self.view addSubview:self.hintLabel];
+	self.uptimeLabel = [[UILabel alloc] initWithFrame:CGRectMake(pad, y, w - pad * 2, 22)];
+	self.uptimeLabel.textAlignment = NSTextAlignmentCenter;
+	self.uptimeLabel.textColor = [UIColor colorWithWhite:0.88 alpha:1.0];
+	self.uptimeLabel.font = [UIFont systemFontOfSize:15];
+	self.uptimeLabel.text = [NSString stringWithFormat:@"当前系统已运行：%@", TRUptimeText()];
+	[self.view addSubview:self.uptimeLabel];
+	y += 32;
 
-	self.daemonButton = [self makeButton:@"① 启用后台守护（当前开机周期内生效）" y:142 color:[UIColor systemBlueColor]];
-	[self.daemonButton addTarget:self action:@selector(enableDaemonTapped) forControlEvents:UIControlEventTouchUpInside];
+	CGFloat buttonsH = 44.0 + 8.0;
+	CGFloat logH = 110.0;
+	CGFloat infoH = self.view.bounds.size.height - y - buttonsH - logH - 8 - 20;
+	if (infoH < 200)
+		infoH = 200;
 
-	self.autostartButton = [self makeButton:@"② 装开机启动器（用 Watch 当宿主）" y:190 color:[UIColor systemIndigoColor]];
-	[self.autostartButton addTarget:self action:@selector(launcherInstallTapped) forControlEvents:UIControlEventTouchUpInside];
+	self.infoView = [[UITextView alloc] initWithFrame:CGRectMake(pad, y, w - pad * 2, infoH)];
+	self.infoView.backgroundColor = [UIColor blackColor];
+	self.infoView.textColor = [UIColor whiteColor];
+	self.infoView.editable = NO;
+	self.infoView.selectable = YES;
+	self.infoView.font = [UIFont monospacedSystemFontOfSize:13 weight:UIFontWeightRegular];
+	self.infoView.textContainerInset = UIEdgeInsetsZero;
+	self.infoView.text = @"正在读取电池…";
+	[self.view addSubview:self.infoView];
+	y += infoH + 8;
 
-	[self makeSmallButton:@"还原宿主" x:pad y:242 action:@selector(restoreTipsTapped)];
-	[self makeSmallButton:@"刷新" x:pad + 92 y:242 action:@selector(refreshTapped)];
-	[self makeSmallButton:@"复制状态" x:pad + 164 y:242 action:@selector(copyTapped)];
-	self.probeButton = [self makeSmallButton:@"充电探针" x:pad + 250 y:242 action:@selector(probeTapped)];
-	[self.probeButton setTitleColor:[UIColor systemOrangeColor] forState:UIControlStateNormal];
+	CGFloat bw = (w - pad * 2 - 10) / 2.0;
+	self.copyButton = [UIButton buttonWithType:UIButtonTypeSystem];
+	self.copyButton.frame = CGRectMake(pad, y, bw, 44);
+	[self.copyButton setTitle:@"复制状态" forState:UIControlStateNormal];
+	self.copyButton.titleLabel.font = [UIFont systemFontOfSize:17 weight:UIFontWeightMedium];
+	self.copyButton.layer.borderColor = [UIColor colorWithRed:0.29 green:0.87 blue:0.31 alpha:1.0].CGColor;
+	self.copyButton.layer.borderWidth = 1.5;
+	self.copyButton.layer.cornerRadius = 22;
+	[self.copyButton addTarget:self action:@selector(copyTapped) forControlEvents:UIControlEventTouchUpInside];
+	[self.view addSubview:self.copyButton];
 
-	self.rebootButton = [self makeButton:@"立即重启（Kernel Reboot）" y:278 color:[UIColor systemRedColor]];
+	self.rebootButton = [UIButton buttonWithType:UIButtonTypeSystem];
+	self.rebootButton.frame = CGRectMake(pad + bw + 10, y, bw, 44);
+	[self.rebootButton setTitle:@"立即重启" forState:UIControlStateNormal];
+	[self.rebootButton setTitleColor:[UIColor colorWithRed:1.0 green:0.35 blue:0.31 alpha:1.0]
+	                        forState:UIControlStateNormal];
+	self.rebootButton.titleLabel.font = [UIFont systemFontOfSize:17 weight:UIFontWeightMedium];
+	self.rebootButton.layer.borderColor = [UIColor colorWithRed:1.0 green:0.35 blue:0.31 alpha:1.0].CGColor;
+	self.rebootButton.layer.borderWidth = 1.5;
+	self.rebootButton.layer.cornerRadius = 22;
 	[self.rebootButton addTarget:self action:@selector(rebootTapped) forControlEvents:UIControlEventTouchUpInside];
+	[self.view addSubview:self.rebootButton];
+	y += 44 + 8;
 
-	CGFloat top = 334;
-	self.statusView = [[UITextView alloc] initWithFrame:CGRectMake(pad, top, w - pad * 2, self.view.bounds.size.height - top - 16)];
-	self.statusView.backgroundColor = [UIColor secondarySystemBackgroundColor];
-	self.statusView.font = [UIFont monospacedSystemFontOfSize:9.5 weight:UIFontWeightRegular];
-	self.statusView.editable = NO;
-	self.statusView.selectable = YES;
-	self.statusView.layer.cornerRadius = 10;
-	self.statusView.textContainerInset = UIEdgeInsetsMake(8, 6, 8, 6);
-	self.statusView.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
-	[self.view addSubview:self.statusView];
-
-	// v3.5-probe：探针面板（默认隐藏，点「充电探针」才出现）
-	self.probeView = [[UITextView alloc] initWithFrame:CGRectMake(pad, top, w - pad * 2, 170)];
-	self.probeView.backgroundColor = [UIColor tertiarySystemBackgroundColor];
-	self.probeView.font = [UIFont monospacedSystemFontOfSize:9.0 weight:UIFontWeightRegular];
-	self.probeView.editable = NO;
-	self.probeView.selectable = YES;
-	self.probeView.layer.cornerRadius = 10;
-	self.probeView.textContainerInset = UIEdgeInsetsMake(6, 6, 6, 6);
-	self.probeView.hidden = YES;
-	self.probeView.autoresizingMask = UIViewAutoresizingFlexibleWidth;
-	[self.view addSubview:self.probeView];
-}
-
-- (UIButton *)makeButton:(NSString *)title y:(CGFloat)y color:(UIColor *)color
-{
-	CGFloat w = self.view.bounds.size.width;
-	UIButton *b = [UIButton buttonWithType:UIButtonTypeSystem];
-	b.frame = CGRectMake(16, y, w - 32, 44);
-	b.backgroundColor = color;
-	[b setTitle:title forState:UIControlStateNormal];
-	[b setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
-	b.titleLabel.font = [UIFont boldSystemFontOfSize:15];
-	b.layer.cornerRadius = 11;
-	b.autoresizingMask = UIViewAutoresizingFlexibleWidth;
-	[self.view addSubview:b];
-	return b;
-}
-
-- (UIButton *)makeSmallButton:(NSString *)title x:(CGFloat)x y:(CGFloat)y action:(SEL)action
-{
-	UIButton *b = [UIButton buttonWithType:UIButtonTypeSystem];
-	b.frame = CGRectMake(x, y, 84, 28);
-	[b setTitle:title forState:UIControlStateNormal];
-	b.titleLabel.font = [UIFont systemFontOfSize:13];
-	[b addTarget:self action:action forControlEvents:UIControlEventTouchUpInside];
-	[self.view addSubview:b];
-	return b;
+	self.logView = [[UITextView alloc] initWithFrame:CGRectMake(pad, y, w - pad * 2, logH)];
+	self.logView.backgroundColor = [UIColor colorWithWhite:0.09 alpha:1.0];
+	self.logView.textColor = [UIColor colorWithWhite:0.72 alpha:1.0];
+	self.logView.editable = NO;
+	self.logView.font = [UIFont monospacedSystemFontOfSize:9 weight:UIFontWeightRegular];
+	self.logView.textContainerInset = UIEdgeInsetsMake(4, 4, 4, 4);
+	self.logView.layer.cornerRadius = 8;
+	[self.view addSubview:self.logView];
 }
 
 - (void)viewDidAppear:(BOOL)animated
 {
 	[super viewDidAppear:animated];
-	[self refreshStatus];
 
-	// v3.4（用户 2026-11-08 批准 ③）：打开 App 时若守护没在跑，静默补起一次。
-	// 不在页面上弹窗、不打断，只写一行日志；已在跑则完全不动作。
-	dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
-		BOOL wasOnline = TRDaemonIsOnline();
-		int rc = 0;
-		if (!wasOnline)
-		{
-			rc = TREnsureDaemonDetached();
-		sleep(2);
-		}
-		BOOL online = TRDaemonIsOnline();
-		dispatch_async(dispatch_get_main_queue(), ^{
-			[self refreshStatus];
-			if (wasOnline)
-				[self appendLog:@"守护已在跑（无需拉起）"];
-			else if (online)
-				[self appendLog:@"打开 App 时守护不在跑，已自动补起"];
-			else
-				[self appendLog:[NSString stringWithFormat:@"自动补起没成功 rc=%d，看 daemon.log", rc]];
-		});
-	});
+	self.uptimeLabel.text = [NSString stringWithFormat:@"当前系统已运行：%@", TRUptimeText()];
+	[self handlePendingURL];
 
-	if (self.pendingURL)
+	// 打开 App 只自动跑一次：起守护 + 开探针
+	if (self.didAutoStart)
 	{
-		NSURL *url = self.pendingURL;
-		self.pendingURL = nil;
-		[self handleIncomingURL:url];
-	}
-}
-
-- (void)refreshStatus
-{
-	NSMutableString *m = [NSMutableString string];
-	[m appendFormat:@"build = TrollReboot 3.5-probe4\n"];
-	[m appendFormat:@"app uid=%u euid=%u\n", getuid(), geteuid()];
-
-	[m appendString:@"\n"];
-	[m appendString:TRLauncherStatusText()];
-
-	NSDictionary *st = TRDaemonStatus();
-	NSString *hb = st[@"heartbeat"];
-	NSNumber *age = st[@"age"];
-	BOOL online = [st[@"online"] boolValue];
-	[m appendFormat:@"daemon 在线=%@  (%@)\n", online ? @"是 ✅" : @"否 ❌",
-		hb.length ? [hb stringByTrimmingCharactersInSet:[NSCharacterSet newlineCharacterSet]] : @"无心跳"];
-	if (age) [m appendFormat:@"心跳年龄=%@s\n", age];
-	[m appendFormat:@"plist  /Library=%@  /System=%@\n",
-		[st[@"plistExists"] boolValue] ? @"在" : @"无",
-		[st[@"systemPlistExists"] boolValue] ? @"在" : @"无"];
-	[m appendFormat:@"守护二进制 /usr/libexec=%@\n", [st[@"binExists"] boolValue] ? @"在" : @"无"];
-	[m appendFormat:@"端点 http://127.0.0.1:8899/reboot\n"];
-
-	NSArray *candidates = TRHelperCandidates();
-	[m appendFormat:@"trollstorehelper 候选=%lu\n", (unsigned long)candidates.count];
-	for (NSString *c in candidates) [m appendFormat:@"  ✔ %@\n", c];
-
-	[m appendString:@"\n"];
-	[m appendString:TRPathsProbe()];
-	[m appendString:TRSystemAppsProbe()];
-	[m appendString:@"\n--- install.log 尾部 ---\n"];
-	[m appendString:TRInstallLogTail(10)];
-	[m appendString:@"\n--- launcher.log 尾部 ---\n"];
-	[m appendString:TRLauncherLogTail(14)];
-	[m appendString:@"\n--- daemon.log 尾部 ---\n"];
-	[m appendString:TRDaemonLogTail(8)];
-
-	self.statusView.text = m;
-	[self.statusView scrollRangeToVisible:NSMakeRange(self.statusView.text.length, 0)];
-
-	NSFileManager *fm = [NSFileManager defaultManager];
-	NSString *dir = [NSHomeDirectory() stringByAppendingPathComponent:@"Documents"];
-	[fm createDirectoryAtPath:dir withIntermediateDirectories:YES attributes:nil error:nil];
-	[[[NSString stringWithFormat:@"[%@]\n%@\n", [NSDate date], m] dataUsingEncoding:NSUTF8StringEncoding]
-		writeToFile:[dir stringByAppendingPathComponent:@"reboot.log"] atomically:YES];
-}
-
-- (void)appendLog:(NSString *)text
-{
-	NSMutableString *m = [NSMutableString stringWithString:self.statusView.text ?: @""];
-	[m appendFormat:@"%@\n", text];
-	self.statusView.text = m;
-	[self.statusView scrollRangeToVisible:NSMakeRange(self.statusView.text.length, 0)];
-}
-
-- (void)refreshTapped { [self refreshStatus]; }
-
-- (void)copyTapped
-{
-	NSMutableString *all = [NSMutableString string];
-	if (self.probeView.text.length > 0)
-	{
-		[all appendString:@"=== 充电探针（只读）===\n"];
-		[all appendString:self.probeView.text];
-		[all appendString:@"\n\n"];
-	}
-	[all appendString:self.statusView.text ?: @""];
-	[UIPasteboard generalPasteboard].string = all;
-}
-
-#pragma mark - v3.5-probe 只读充电探针
-
-- (void)probeTapped
-{
-	if (self.probing)
-	{
-		[self stopProbe];
+		[self probeTick];
 		return;
 	}
-	[self startProbe];
+	self.didAutoStart = YES;
+
+	[self appendLog:@"打开 App：自动检查后台守护…"];
+	__weak typeof(self) weakSelf = self;
+	dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+		int rc = TREnsureDaemonDetached();
+		sleep(2);
+		dispatch_async(dispatch_get_main_queue(), ^{
+			RootViewController *s2 = weakSelf;
+			if (s2 == nil)
+				return;
+			BOOL online = [TRDaemonStatus()[@"online"] boolValue];
+			[s2 appendLog:online ? [NSString stringWithFormat:@"✅ 后台守护在线（rc=%d）", rc]
+			                     : [NSString stringWithFormat:@"⚠️ 守护没起来 rc=%d（看 daemon.log）", rc]];
+			[s2 startProbe];
+		});
+	});
 }
+
+#pragma mark - 探针（自动运行）
 
 - (void)startProbe
 {
-	self.probing = YES;
+	if (self.probeTimer != nil)
+		return;
+
 	self.probeTicks = 0;
-	self.probeFailStreak = 0;
-	self.probeRestarted = NO;
-	self.probeStart = time(NULL);
-	self.probeLines = [NSMutableArray array];
-	[self.probeButton setTitle:@"停止探针" forState:UIControlStateNormal];
+	self.failStreak = 0;
+	[self appendLog:@"自动开始充电探针（每秒一次）"];
 
-	CGFloat pad = 16.0;
-	CGFloat w = self.view.bounds.size.width;
-	CGFloat top = 334.0;
-	CGFloat probeH = 170.0;
-	self.probeView.hidden = NO;
-	self.probeView.frame = CGRectMake(pad, top, w - pad * 2, probeH);
-	self.statusView.frame = CGRectMake(pad, top + probeH + 8, w - pad * 2,
-	                                   self.view.bounds.size.height - (top + probeH + 8) - 16);
-	self.probeView.text = @"(第 1 秒采样中…)";
-
-	TRProbeLogAppend([NSString stringWithFormat:@"===== probe start %@", [NSDate date]]);
 	[self probeTick];
-
 	self.probeTimer = [NSTimer timerWithTimeInterval:1.0
 	                                          target:self
 	                                        selector:@selector(probeTick)
@@ -271,104 +233,66 @@
 
 - (void)stopProbe
 {
-	if (!self.probing)
-		return;
-	self.probing = NO;
 	[self.probeTimer invalidate];
 	self.probeTimer = nil;
-	[self.probeButton setTitle:@"充电探针" forState:UIControlStateNormal];
-
-	CGFloat pad = 16.0;
-	CGFloat w = self.view.bounds.size.width;
-	CGFloat top = 334.0;
-	self.probeView.hidden = YES;
-	self.statusView.frame = CGRectMake(pad, top, w - pad * 2,
-	                                   self.view.bounds.size.height - top - 16);
-
-	TRProbeLogAppend(@"===== probe stop");
-	[self refreshStatus];
 }
 
 - (void)probeTick
 {
-	if (!self.probing)
-		return;
-
 	self.probeTicks++;
 	NSInteger tick = self.probeTicks;
 
-	// v3.5-probe3：电池只在 root 守护进程里读（App 里碰私有 IOKit 会闪退），App 只取 HTTP 文本。
-	// 只有「守护版本旧、没有 /battery」才重启一次守护；失败绝不每秒重启（那会造成守护抖动）。
+	__weak typeof(self) weakSelf = self;
 	dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
-		NSString *text = [self batteryTextWithOneRestart];
-
+		NSDictionary *snap = [weakSelf fetchSnapshot];
 		dispatch_async(dispatch_get_main_queue(), ^{
-			if (!self.probing)
+			RootViewController *s2 = weakSelf;
+			if (s2 == nil)
 				return;
-
-			BOOL failed = (text.length == 0);
-			NSString *line = failed
-				? [NSString stringWithFormat:@"#%ld ❌ 守护没响应/读电池失败（看 daemon.log 的 /battery 行）", (long)tick]
-				: [NSString stringWithFormat:@"#%ld %@", (long)tick, text];
-
-			// 每秒都落盘（fsync），崩溃/重启也不丢采样
-			TRProbeLogAppend(line);
-
-			[self.probeLines addObject:line];
-			if (self.probeLines.count > 150)
-				[self.probeLines removeObjectAtIndex:0];
-
-			NSString *elapsed = [NSString stringWithFormat:
-				@"探针中 · 已 %ld 秒 · 数据来自 root 守护 /battery · 日志 Documents/charge-probe.log",
-				(long)(time(NULL) - self.probeStart)];
-			// 采样是异步回来的，#16 可能比 #15 先到，显示前按编号排一下
-			NSArray<NSString *> *ordered = [self.probeLines sortedArrayUsingComparator:^NSComparisonResult(NSString *a, NSString *b) {
-				NSInteger na = [a hasPrefix:@"#"] ? [[a substringFromIndex:1] integerValue] : 0;
-				NSInteger nb = [b hasPrefix:@"#"] ? [[b substringFromIndex:1] integerValue] : 0;
-				if (na < nb) return NSOrderedAscending;
-				if (na > nb) return NSOrderedDescending;
-				return NSOrderedSame;
-			}];
-			NSString *bodyText = [ordered componentsJoinedByString:@"\n"];
-			self.probeView.text = [NSString stringWithFormat:@"%@\n%@", elapsed, bodyText];
-			[self.probeView scrollRangeToVisible:NSMakeRange(self.probeView.text.length, 0)];
-
-			if (failed)
+			if (snap == nil)
 			{
-				self.probeFailStreak += 1;
-				if (self.probeFailStreak >= 3)
+				s2.failStreak += 1;
+				if (s2.failStreak == 3)
+					[s2 appendLog:@"⚠️ 连续没拿到电池数据（守护没响应）"];
+				if (s2.failStreak >= 10)
 				{
-					[self stopProbe];
-					[self appendLog:@"探针已自动停止：守护连续 3 秒没响应，先点「① 启用后台守护」并看 daemon.log 的 /battery 行"];
+					[s2 stopProbe];
+					[s2 appendLog:@"探针暂停：守护一直没响应，重开 App 再试"];
 				}
+				return;
 			}
-			else
-			{
-				self.probeFailStreak = 0;
-			}
+			s2.failStreak = 0;
+			[s2 renderSnapshot:snap tick:tick];
 		});
 	});
 }
 
-/// 取一次 /battery 文本；仅当守护版本旧（unknown path）时重启一次守护再取
-- (NSString *)batteryTextWithOneRestart
+#pragma mark - 取数据
+
+/// 向守护要一份 JSON 快照；守护是旧版（unknown path）时重启一次再试
+- (NSDictionary *)fetchSnapshot
 {
-	NSString *t = [self batteryTextOnce];
-	if ([t isEqualToString:@"unknown path"] && !self.probeRestarted)
+	NSString *raw = [self rawRequest:@"/batteryjson"];
+	if ([raw isEqualToString:@"unknown path"])
 	{
-		self.probeRestarted = YES;
 		TRRestartDaemonDetached();
 		sleep(2);
-		t = [self batteryTextOnce];
+		raw = [self rawRequest:@"/batteryjson"];
 	}
-	if ([t isEqualToString:@"unknown path"])
-		return @"";
-	return t;
+	if (raw.length == 0 || [raw isEqualToString:@"unknown path"])
+		return nil;
+
+	NSData *data = [raw dataUsingEncoding:NSUTF8StringEncoding];
+	if (data.length == 0)
+		return nil;
+
+	id obj = [NSJSONSerialization JSONObjectWithData:data options:0 error:NULL];
+	return [obj isKindOfClass:[NSDictionary class]] ? (NSDictionary *)obj : nil;
 }
 
-- (NSString *)batteryTextOnce
+- (NSString *)rawRequest:(NSString *)path
 {
-	NSString *body = TRDaemonRequest(@"/battery");
+	NSString *body = TRDaemonRequest(path);
 	NSString *t = [body ?: @"" stringByTrimmingCharactersInSet:
 	               [NSCharacterSet whitespaceAndNewlineCharacterSet]];
 	if (t.length == 0 || [t isEqualToString:@"(无响应)"] || [t hasPrefix:@"connect"])
@@ -376,119 +300,163 @@
 	return t;
 }
 
-- (void)enableDaemonTapped
-{
-	if (self.busy) return;
-	self.busy = YES;
-	self.daemonButton.enabled = NO;
-	[self appendLog:@"--- 启用后台守护（分离进程）---"];
+#pragma mark - 渲染
 
-	dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
-		int rc = TRLaunchDaemonDetached();
-		sleep(2);
-		BOOL online = [TRDaemonStatus()[@"online"] boolValue];
-		dispatch_async(dispatch_get_main_queue(), ^{
-			[self refreshStatus];
-			[self appendLog:online
-				? @"✅ 守护已在线（当前开机周期内有效，重启后需自启）"
-				: [NSString stringWithFormat:@"❌ 没起来 rc=%d，看 install.log", rc]];
-			self.busy = NO;
-			self.daemonButton.enabled = YES;
-		});
-	});
+- (void)renderSnapshot:(NSDictionary *)s tick:(NSInteger)tick
+{
+	BOOL ok = [s[@"ok"] boolValue];
+	NSNumber *pct = s[@"percent"];
+	NSNumber *cur = s[@"currentMA"];
+	NSNumber *volt = s[@"voltageMV"];
+	NSNumber *temp = s[@"tempC"];
+	NSNumber *health = s[@"healthPercent"];
+	NSNumber *cycles = s[@"cycleCount"];
+	NSNumber *design = s[@"designCapacity"];
+	NSNumber *rawCap = s[@"rawCapacity"];
+	NSNumber *rawMax = s[@"rawMaxCapacity"];
+	NSNumber *full = s[@"maxCapacity"];
+	NSNumber *power = s[@"powerW"];
+
+	// 大电池图标随电量变化
+	NSString *symbol = @"battery.100";
+	if (pct)
+	{
+		NSInteger p = [pct integerValue];
+		if (p < 13) symbol = @"battery.0";
+		else if (p < 38) symbol = @"battery.25";
+		else if (p < 63) symbol = @"battery.50";
+		else if (p < 88) symbol = @"battery.75";
+	}
+	if ([s[@"charging"] boolValue])
+		symbol = [symbol stringByAppendingString:@".bolt"];
+	if (@available(iOS 13.0, *))
+	{
+		UIImage *img = [UIImage systemImageNamed:symbol] ?: [UIImage systemImageNamed:@"battery.100"];
+		self.batteryIcon.image = [img imageWithRenderingMode:UIImageRenderingModeAlwaysTemplate];
+	}
+
+	if (!ok)
+	{
+		self.infoView.text = [NSString stringWithFormat:@"读取失败：%@", s[@"error"] ?: @"?"];
+		return;
+	}
+
+	NSMutableString *m = [NSMutableString string];
+
+	[m appendFormat:@"电池健康状态：%@\n",
+		health ? [NSString stringWithFormat:@"%.0f%%", [health doubleValue]] : @"?"];
+	[m appendFormat:@"电池循环次数：%@ 次\n",
+		cycles ? [NSString stringWithFormat:@"%ld", (long)[cycles integerValue]] : @"?"];
+	[m appendFormat:@"电池设计容量：%@ mAh\n",
+		design ? [NSString stringWithFormat:@"%ld", (long)[design integerValue]] : @"?"];
+	[m appendFormat:@"电池剩余容量：%@ mAh\n",
+		rawCap ? [NSString stringWithFormat:@"%ld", (long)[rawCap integerValue]] : @"?"];
+	[m appendFormat:@"电池实时容量：%@ mAh\n",
+		full ? [NSString stringWithFormat:@"%ld", (long)[full integerValue]] : @"?"];
+	[m appendFormat:@"电池预计充电：%@\n",
+		[s[@"fullyCharged"] boolValue] ? @"已充满"
+		                               : ([s[@"charging"] boolValue] ? @"充电中" : @"未在充电")];
+	[m appendFormat:@"电池当前温度：%@\n",
+		temp ? [NSString stringWithFormat:@"%.1f℃", [temp doubleValue]] : @"?"];
+	[m appendFormat:@"电池当前电压：%@\n",
+		volt ? [NSString stringWithFormat:@"%.2fV", [volt doubleValue] / 1000.0] : @"?"];
+	[m appendFormat:@"电池当前电流：%@ mA\n",
+		cur ? [NSString stringWithFormat:@"%ld", (long)[cur integerValue]] : @"?"];
+	[m appendFormat:@"电池当前功率：%@\n",
+		power ? [NSString stringWithFormat:@"%.1fW（算值）", [power doubleValue]] : @"?"];
+	[m appendFormat:@"电池当前电量：%@\n",
+		pct ? [NSString stringWithFormat:@"%ld%%", (long)[pct integerValue]] : @"?"];
+	[m appendFormat:@"插电状态：%@\n", [s[@"external"] boolValue] ? @"已连接充电器" : @"未插电"];
+	[m appendFormat:@"内存占用估算：%.0f MB\n", TRMemoryUsageMB()];
+
+	NSDictionary *ds = TRDaemonStatus();
+	[m appendFormat:@"后台守护：%@", [ds[@"online"] boolValue] ? @"在线 ✅" : @"离线 ❌"];
+	if ([ds[@"online"] boolValue])
+		[m appendFormat:@"  uid=%@ pid=%@", ds[@"uid"] ?: @"?", ds[@"pid"] ?: @"?"];
+	[m appendFormat:@"\n"];
+	[m appendFormat:@"探针：运行中（第 %ld 秒）\n", (long)tick];
+	[m appendFormat:@"%@\n", TRMonitorVerdict(s)];
+
+	if (rawMax)
+		[m appendFormat:@"满容量：%ld mAh\n", (long)[rawMax integerValue]];
+
+	[m appendFormat:@"版本：%@\n", TR_BUILD_TAG];
+
+	self.infoView.text = m;
+
+	// 采样也落盘（fsync），App 被杀也不丢
+	if (tick % 5 == 1)
+		TRProbeLogAppend([NSString stringWithFormat:@"#%ld %@", (long)tick, TRBatteryLine(s)]);
 }
 
-- (void)launcherInstallTapped
-{
-	if (self.busy) return;
-	self.busy = YES;
-	self.autostartButton.enabled = NO;
-	[self appendLog:@"--- 安装开机启动器（把宿主 Watch 的主可执行换成我们，原件改名备份）---"];
+#pragma mark - 按钮
 
-	dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
-		int rc = TRLauncherInstallViaRoot();
-		sleep(1);
-		dispatch_async(dispatch_get_main_queue(), ^{
-			[self refreshStatus];
-			if (rc == 0)
-				[self appendLog:@"✅ 启动器已安装。现在重启手机，然后只解锁（不打开任何 App）等 30 秒，看心跳是否刷新。"];
-			else
-				[self appendLog:[NSString stringWithFormat:@"❌ 安装失败 rc=%d，看下面 launcher.log", rc]];
-			self.busy = NO;
-			self.autostartButton.enabled = YES;
-		});
-	});
-}
-
-- (void)restoreTipsTapped
+- (void)copyTapped
 {
-	if (self.busy) return;
-	self.busy = YES;
-	[self appendLog:@"--- 还原宿主原件 ---"];
-
-	dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
-		int rc = TRLauncherUninstallViaRoot();
-		sleep(1);
-		dispatch_async(dispatch_get_main_queue(), ^{
-			[self refreshStatus];
-			[self appendLog:rc == 0
-				? @"✅ 已还原（宿主恢复原样，开机启动器失效）"
-				: [NSString stringWithFormat:@"❌ 还原失败 rc=%d，看下面 launcher.log", rc]];
-			self.busy = NO;
-		});
-	});
-}
-- (void)uninstallTapped
-{
-	if (self.busy) return;
-	self.busy = YES;
-	[self appendLog:@"--- 移除开机自启 ---"];
-	dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
-		TRUninstallDaemonViaRoot();
-		dispatch_async(dispatch_get_main_queue(), ^{
-			[self refreshStatus];
-			[self appendLog:@"已移除 launchd 作业与 plist（当前进程仍在跑）"];
-			self.busy = NO;
-		});
-	});
+	NSString *text = [NSString stringWithFormat:@"%@ %@\n%@\n--- 日志 ---\n%@",
+	                                           TRDeviceName(),
+	                                           [[UIDevice currentDevice] systemVersion],
+	                                           self.infoView.text ?: @"",
+	                                           [self.logLines componentsJoinedByString:@"\n"]];
+	[UIPasteboard generalPasteboard].string = text;
+	[self appendLog:@"已复制到剪贴板"];
 }
 
 - (void)rebootTapped
 {
-	if (self.busy) return;
+	if (self.busy)
+		return;
 	self.busy = YES;
-	self.rebootButton.enabled = NO;
-	[self appendLog:@"--- 用户点击重启 ---"];
-
+	[self appendLog:@"请求重启…"];
+	__weak typeof(self) weakSelf = self;
 	dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
-		NSString *log = nil;
-		TRRequestReboot(&log);
+		NSDictionary *r = TRRequestReboot();
 		dispatch_async(dispatch_get_main_queue(), ^{
-			[self appendLog:log ?: @"(无日志)"];
-			self.busy = NO;
-			self.rebootButton.enabled = YES;
+			RootViewController *s2 = weakSelf;
+			[s2 appendLog:[NSString stringWithFormat:@"重启结果：%@", r[@"detail"] ?: @"?"]];
+			s2.busy = NO;
 		});
 	});
 }
 
+#pragma mark - URL / 日志
+
+/// 外部（URL scheme）把请求转进来
 - (void)handleIncomingURL:(NSURL *)url
 {
-	if (!self.isViewLoaded)
-	{
-		self.pendingURL = url;
-		return;
-	}
+	self.pendingURL = url;
+	if (self.isViewLoaded)
+		[self handlePendingURL];
+}
 
-	NSString *scheme = url.scheme.lowercaseString;
-	[self appendLog:[NSString stringWithFormat:@"收到 URL: %@", url.absoluteString]];
-
-	BOOL schemeOK = [scheme isEqualToString:@"trollreboot"] || [scheme isEqualToString:@"reboottools"];
-	if (!schemeOK)
-	{
-		[self appendLog:[NSString stringWithFormat:@"忽略 scheme=%@", scheme]];
+- (void)handlePendingURL
+{
+	if (self.pendingURL == nil)
 		return;
-	}
-	[self rebootTapped];
+
+	NSURL *u = self.pendingURL;
+	self.pendingURL = nil;
+	[self appendLog:[NSString stringWithFormat:@"收到 URL：%@", u.absoluteString]];
+
+	NSString *host = u.host ?: @"";
+	if ([host isEqualToString:@"reboot"])
+		[self rebootTapped];
+}
+
+- (void)appendLog:(NSString *)line
+{
+	time_t now = time(NULL);
+	struct tm tmv;
+	localtime_r(&now, &tmv);
+	char hhmmss[16];
+	snprintf(hhmmss, sizeof(hhmmss), "%02d:%02d:%02d", tmv.tm_hour, tmv.tm_min, tmv.tm_sec);
+
+	[self.logLines addObject:[NSString stringWithFormat:@"[%s] %@", hhmmss, line]];
+	if (self.logLines.count > 200)
+		[self.logLines removeObjectAtIndex:0];
+
+	self.logView.text = [self.logLines componentsJoinedByString:@"\n"];
+	[self.logView scrollRangeToVisible:NSMakeRange(self.logView.text.length, 0)];
 }
 
 @end
