@@ -27,7 +27,7 @@
 #import "TRMonitor.h"
 #import "TRRootOps.h"
 
-#define BG_TAG @"BatteryGuard 1.1 app-bridge"
+#define BG_TAG @"BatteryGuard 1.2 app-bridge"
 #define BGDIR @"/var/mobile/Library/Caches/com.wan.batterychargeguard"
 #define BG_TICK_SEC 2.0
 #define BG_LOG_MAX 512 * 1024
@@ -359,9 +359,36 @@ static NSDictionary *BGMakeSample(NSDictionary *app, NSString *text)
 	if (!chg)
 		chg = BGFlag(text, @[ @"未在充电", @"已充满", @"未充电" ], @[ @"充电中", @"正在充电" ]);
 
-	// IOKit 原始温度单位是 0.1℃
-	if (tmp && [tmp doubleValue] > 150.0)
-		tmp = @([tmp doubleValue] / 10.0);
+	// 温度：字典值单位不确定（电池助手给 0.01℃、IOKit 给 0.1℃），反复除 10 直到落进合理量程
+	if (tmp)
+	{
+		double t = [tmp doubleValue];
+		int guard = 0;
+		while (fabs(t) > 150.0 && guard < 4)
+		{
+			t /= 10.0;
+			guard++;
+		}
+		tmp = (fabs(t) <= 150.0) ? @(t) : nil;
+	}
+
+	// App 界面上直接显示的「电池当前温度：24.9°C」是最可信的，优先用它
+	NSNumber *textTemp = BGNumberAfter(text, @"温度");
+	if (textTemp)
+	{
+		double tt = [textTemp doubleValue];
+		if (tt > -20.0 && tt < 80.0)
+			tmp = @(tt);
+	}
+
+	// 电流同理：界面文本「电池当前电流：-123mA」优先
+	NSNumber *textCurrent = BGNumberAfter(text, @"电流");
+	if (textCurrent)
+	{
+		double cc = [textCurrent doubleValue];
+		if (fabs(cc) <= 10000.0)
+			cur = @(cc);
+	}
 
 	if (!pct && raw && rawMax && [rawMax doubleValue] > 0)
 		pct = @(round([raw doubleValue] * 100.0 / [rawMax doubleValue]));
@@ -607,20 +634,7 @@ static void BGTick(void)
 	NSString *block = TRMonitorSafetyBlock(state);
 	NSString *safety = BGSafetyText(state);
 
-	// —— 每 2 秒滚动输出（面板 + 日志，App 原始字段整份转发，不截断）——
-	NSString *appDump = @"-";
-	if (app.count)
-	{
-		NSMutableArray<NSString *> *kv = [NSMutableArray array];
-		NSArray *sortedKeys = [[app allKeys] sortedArrayUsingSelector:@selector(compare:)];
-		for (NSString *k in sortedKeys)
-		{
-			id v = app[k];
-			NSString *vs = [v isKindOfClass:[NSString class]] ? (NSString *)v : [v description];
-			[kv addObject:[NSString stringWithFormat:@"%@=%@", k, vs]];
-		}
-		appDump = [kv componentsJoinedByString:@" "];
-	}
+	// App 原始字段（不打印）：这里只用来做归一化，日志与面板都不再输出原始 dump
 
 	NSString *norm = [NSString stringWithFormat:@"电量=%@ 电流=%@mA 温度=%@℃ 插电=%@ 在充=%@",
 	                           sample[@"percent"] ?: @"?",
@@ -644,31 +658,9 @@ static void BGTick(void)
 	if (sample[@"error"])
 		[panel addObject:[NSString stringWithFormat:@"缺失:%@", sample[@"error"]]];
 
-	// App 原始字段整份滚动展示（面板一行窗口滚动，日志里每轮全量落盘）
-	if (appDump.length)
-	{
-		NSUInteger window = 110;
-		NSString *shown = appDump;
-		if (appDump.length > window)
-		{
-			if (gRawPos + window > appDump.length)
-				gRawPos = 0;
-			shown = [NSString stringWithFormat:@"…%@…（%lu字 %lu–%lu）",
-			                                   [appDump substringWithRange:NSMakeRange(gRawPos, window)],
-			                                   (unsigned long)appDump.length,
-			                                   (unsigned long)gRawPos,
-			                                   (unsigned long)(gRawPos + window)];
-			gRawPos = (gRawPos + window) % appDump.length;
-		}
-		[panel addObject:[@"原始:" stringByAppendingString:shown]];
-	}
-
 	BGUpdateText([panel componentsJoinedByString:@"\n"]);
 
 	BGLog([NSString stringWithFormat:@"[tick %ld] %@", (long)gTickSeq, [panel componentsJoinedByString:@" / "]]);
-	BGLog([NSString stringWithFormat:@"[tick %ld] app=%@", (long)gTickSeq, appDump]);
-	if (text.length)
-		BGLog([NSString stringWithFormat:@"[tick %ld] ui=%@", (long)gTickSeq, text]);
 
 	// —— 到阈值才动手 ——
 	if (stuck && gStuckSec >= needSec && !gRebooting)
@@ -721,45 +713,34 @@ static void BGInstallPanel(void)
 		return;
 
 	CGFloat width = key.bounds.size.width;
-	CGFloat height = 236;
-	CGRect frame = CGRectMake(12, key.bounds.size.height - height - 20, width - 24, height);
+	CGFloat height = 150;
+	CGRect frame = CGRectMake(10, key.bounds.size.height - height - 8, width - 20, height);
 
 	UIView *panel = [[UIView alloc] initWithFrame:frame];
-	panel.backgroundColor = [UIColor colorWithWhite:0.07 alpha:0.94];
+	panel.backgroundColor = [UIColor colorWithWhite:0.06 alpha:0.9];
 	panel.layer.cornerRadius = 12;
 	panel.layer.masksToBounds = YES;
 
-	gHeadLabel = [[UILabel alloc] initWithFrame:CGRectMake(10, 6, frame.size.width - 20, 14)];
-	gHeadLabel.textColor = [UIColor colorWithRed:0.45 green:0.9 blue:0.55 alpha:1];
-	gHeadLabel.font = [UIFont boldSystemFontOfSize:10];
-	gHeadLabel.text = [[BG_TAG stringByAppendingString:@" · 2s · 转发App读数"] copy];
-	[panel addSubview:gHeadLabel];
-
-	gBodyLabel = [[UILabel alloc] initWithFrame:CGRectMake(10, 22, frame.size.width - 20, 132)];
-	gBodyLabel.numberOfLines = 0;
-	gBodyLabel.textColor = [UIColor whiteColor];
-	gBodyLabel.font = [UIFont monospacedSystemFontOfSize:9 weight:UIFontWeightRegular];
-	gBodyLabel.text = @"启动中…（等第一轮 2s 采样）";
-	[panel addSubview:gBodyLabel];
-
-	UITextField *field = [[UITextField alloc] initWithFrame:CGRectMake(10, 160, 52, 28)];
-	field.backgroundColor = [UIColor colorWithWhite:1 alpha:0.12];
+	// —— 顶部一行：分钟输入 + 保存 + 立即重启（放在最上面，不压住下面滚动信息）——
+	UITextField *field = [[UITextField alloc] initWithFrame:CGRectMake(10, 8, 46, 28)];
+	field.backgroundColor = [UIColor colorWithWhite:1 alpha:0.14];
 	field.textColor = [UIColor whiteColor];
 	field.textAlignment = NSTextAlignmentCenter;
 	field.keyboardType = UIKeyboardTypeNumberPad;
 	field.layer.cornerRadius = 6;
+	field.font = [UIFont boldSystemFontOfSize:13];
 	field.text = [NSString stringWithFormat:@"%ld", (long)TRMonitorStuckMinutes()];
 	[panel addSubview:field];
 
-	UILabel *unit = [[UILabel alloc] initWithFrame:CGRectMake(68, 160, 22, 28)];
-	unit.textColor = [UIColor colorWithWhite:1 alpha:0.7];
+	UILabel *unit = [[UILabel alloc] initWithFrame:CGRectMake(58, 8, 30, 28)];
+	unit.textColor = [UIColor colorWithWhite:1 alpha:0.72];
 	unit.font = [UIFont systemFontOfSize:10];
 	unit.text = @"分钟";
 	[panel addSubview:unit];
 
 	UIButton *save = [UIButton buttonWithType:UIButtonTypeSystem];
-	save.frame = CGRectMake(96, 160, 62, 28);
-	save.backgroundColor = [UIColor colorWithWhite:1 alpha:0.16];
+	save.frame = CGRectMake(90, 8, 56, 28);
+	save.backgroundColor = [UIColor colorWithWhite:1 alpha:0.18];
 	[save setTitle:@"保存" forState:UIControlStateNormal];
 	[save setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
 	save.titleLabel.font = [UIFont boldSystemFontOfSize:11];
@@ -779,7 +760,7 @@ static void BGInstallPanel(void)
 	[panel addSubview:save];
 
 	UIButton *rebootBtn = [UIButton buttonWithType:UIButtonTypeSystem];
-	rebootBtn.frame = CGRectMake(166, 160, frame.size.width - 186, 28);
+	rebootBtn.frame = CGRectMake(150, 8, frame.size.width - 160, 28);
 	rebootBtn.backgroundColor = [UIColor colorWithRed:0.9 green:0.2 blue:0.15 alpha:1];
 	[rebootBtn setTitle:@"立即重启" forState:UIControlStateNormal];
 	[rebootBtn setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
@@ -791,12 +772,18 @@ static void BGInstallPanel(void)
 	} ] forControlEvents:UIControlEventTouchUpInside];
 	[panel addSubview:rebootBtn];
 
-	UILabel *hint = [[UILabel alloc] initWithFrame:CGRectMake(10, 194, frame.size.width - 20, 34)];
-	hint.numberOfLines = 0;
-	hint.textColor = [UIColor colorWithWhite:1 alpha:0.55];
-	hint.font = [UIFont systemFontOfSize:9];
-	hint.text = @"条件：插电+在充+未满+温度0–45℃+|电流|<50mA 持续 N 分钟。安全：15min冷却/开机3次/小时3次/天8次/熔断3次。";
-	[panel addSubview:hint];
+	gHeadLabel = [[UILabel alloc] initWithFrame:CGRectMake(10, 40, frame.size.width - 20, 12)];
+	gHeadLabel.textColor = [UIColor colorWithRed:0.45 green:0.9 blue:0.55 alpha:1];
+	gHeadLabel.font = [UIFont boldSystemFontOfSize:9.5];
+	gHeadLabel.text = [[BG_TAG stringByAppendingString:@" · 2s · 源App"] copy];
+	[panel addSubview:gHeadLabel];
+
+	gBodyLabel = [[UILabel alloc] initWithFrame:CGRectMake(10, 54, frame.size.width - 20, 90)];
+	gBodyLabel.numberOfLines = 0;
+	gBodyLabel.textColor = [UIColor whiteColor];
+	gBodyLabel.font = [UIFont monospacedSystemFontOfSize:8.5 weight:UIFontWeightRegular];
+	gBodyLabel.text = @"启动中…（等第一轮 2s 采样）";
+	[panel addSubview:gBodyLabel];
 
 	[key addSubview:panel];
 
