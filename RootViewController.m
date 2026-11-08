@@ -32,7 +32,7 @@
 	CGFloat pad = 16.0;
 
 	self.titleLabel = [[UILabel alloc] initWithFrame:CGRectMake(pad, 48, w - pad * 2, 36)];
-	self.titleLabel.text = @"TrollReboot 1.6";
+	self.titleLabel.text = @"TrollReboot 1.7";
 	self.titleLabel.font = [UIFont boldSystemFontOfSize:28];
 	[self.view addSubview:self.titleLabel];
 
@@ -40,7 +40,7 @@
 	self.hintLabel.numberOfLines = 0;
 	self.hintLabel.font = [UIFont systemFontOfSize:11];
 	self.hintLabel.textColor = [UIColor secondaryLabelColor];
-	self.hintLabel.text = @"① 现在生效（手动）　② 开机自启（写入后重启，由系统在开机/解锁时拉起，不需要打开 App）\n锁屏触发用快捷指令「获取 URL 内容」访问 http://127.0.0.1:8899/reboot";
+	self.hintLabel.text = @"本版会一次性静默装好开机自启：之后开机→解锁，守护自动在后台跑，不用打开 App、不用点按钮。\n锁屏触发用快捷指令「获取 URL 内容」访问 http://127.0.0.1:8899/reboot";
 	[self.view addSubview:self.hintLabel];
 
 	self.daemonButton = [self makeButton:@"① 启用后台守护（立即生效）" y:132 color:[UIColor systemBlueColor]];
@@ -100,7 +100,28 @@
 	[super viewDidAppear:animated];
 	[self refreshStatus];
 
-	// 不再在打开 App 时自动拉起守护（用户要求：守护应由开机/解锁触发，而不是靠开 App）
+	// 不把守护进程「现在拉起来」当兜底；但把 launchd 作业装好是一次性动作：
+	// 没装过就静默装一遍，之后每次开机/解锁由系统自己拉起，无需打开 App、无需点按钮。
+	NSDictionary *st = TRDaemonStatus();
+	if (![st[@"plistExists"] boolValue] && ![st[@"systemPlistExists"] boolValue])
+	{
+		if (!self.didAutoStart)
+		{
+			self.didAutoStart = YES;
+			dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
+				BOOL online = [TRDaemonStatus()[@"online"] boolValue];
+				int rc;
+				if (online) { TRDaemonRequest(@"/install"); rc = 0; }
+				else rc = TRInstallDaemonViaRoot();   // 内部：阻塞失败会自动改用分离进程重试
+				sleep(1);
+				dispatch_async(dispatch_get_main_queue(), ^{
+					[self refreshStatus];
+					[self appendLog:[NSString stringWithFormat:
+						@"已静默安装开机自启作业 rc=%d（之后开机/解锁由系统拉起，不用再点按钮）", rc]];
+				});
+			});
+		}
+	}
 
 
 	if (self.pendingURL)
@@ -114,7 +135,7 @@
 - (void)refreshStatus
 {
 	NSMutableString *m = [NSMutableString string];
-	[m appendFormat:@"build = TrollReboot 1.6\n"];
+	[m appendFormat:@"build = TrollReboot 1.7\n"];
 	[m appendFormat:@"app uid=%u euid=%u\n", getuid(), geteuid()];
 
 	NSDictionary *st = TRDaemonStatus();
