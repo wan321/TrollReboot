@@ -1,8 +1,10 @@
 #import "RootViewController.h"
 #import "TRRootOps.h"
 #import "TRDaemon.h"
+#import "TRBattery.h"
 
 #include <unistd.h>
+#include <time.h>
 
 @interface RootViewController ()
 @property (nonatomic, strong) UILabel *titleLabel;
@@ -14,6 +16,15 @@
 @property (nonatomic, assign) BOOL busy;
 @property (nonatomic, assign) BOOL didAutoStart;
 @property (nonatomic, strong) NSURL *pendingURL;
+
+// v3.5-probe：只读充电探针
+@property (nonatomic, strong) UIButton *probeButton;
+@property (nonatomic, strong) UITextView *probeView;
+@property (nonatomic, strong) NSTimer *probeTimer;
+@property (nonatomic, strong) NSMutableArray<NSString *> *probeLines;
+@property (nonatomic, assign) BOOL probing;
+@property (nonatomic, assign) NSInteger probeTicks;
+@property (nonatomic, assign) time_t probeStart;
 @end
 
 @implementation RootViewController
@@ -32,7 +43,7 @@
 	CGFloat pad = 16.0;
 
 	self.titleLabel = [[UILabel alloc] initWithFrame:CGRectMake(pad, 48, w - pad * 2, 36)];
-	self.titleLabel.text = @"TrollReboot 3.4";
+	self.titleLabel.text = @"TrollReboot 3.5-probe";
 	self.titleLabel.font = [UIFont boldSystemFontOfSize:28];
 	[self.view addSubview:self.titleLabel];
 
@@ -40,7 +51,7 @@
 	self.hintLabel.numberOfLines = 0;
 	self.hintLabel.font = [UIFont systemFontOfSize:11];
 	self.hintLabel.textColor = [UIColor secondaryLabelColor];
-	self.hintLabel.text = @"v3.4 打开 App 或点 Watch 图标，都会「没有就自动补起守护」，已在跑则跳过（不会再起多个）。\n装启动器仍只需点一次「②」（宿主 Watch，原件自动备份，GTA Tracker 完全不碰）。\n锁屏触发：快捷指令「获取 URL 内容」访问 http://127.0.0.1:8899/reboot";
+	self.hintLabel.text = @"本版只加「充电探针」：每秒读一次电池（私有 IOKit / AppleSmartBattery），只显示不动作，绝不会重启。\n插电、拔电各看几行，确认电流/电压/温度能不能读到、符号正不正。\n探针数据同时写进 Documents/charge-probe.log，可点「复制状态」整段发我。";
 	[self.view addSubview:self.hintLabel];
 
 	self.daemonButton = [self makeButton:@"① 启用后台守护（当前开机周期内生效）" y:142 color:[UIColor systemBlueColor]];
@@ -52,6 +63,8 @@
 	[self makeSmallButton:@"还原宿主" x:pad y:242 action:@selector(restoreTipsTapped)];
 	[self makeSmallButton:@"刷新" x:pad + 92 y:242 action:@selector(refreshTapped)];
 	[self makeSmallButton:@"复制状态" x:pad + 164 y:242 action:@selector(copyTapped)];
+	self.probeButton = [self makeSmallButton:@"充电探针" x:pad + 250 y:242 action:@selector(probeTapped)];
+	[self.probeButton setTitleColor:[UIColor systemOrangeColor] forState:UIControlStateNormal];
 
 	self.rebootButton = [self makeButton:@"立即重启（Kernel Reboot）" y:278 color:[UIColor systemRedColor]];
 	[self.rebootButton addTarget:self action:@selector(rebootTapped) forControlEvents:UIControlEventTouchUpInside];
@@ -66,6 +79,18 @@
 	self.statusView.textContainerInset = UIEdgeInsetsMake(8, 6, 8, 6);
 	self.statusView.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
 	[self.view addSubview:self.statusView];
+
+	// v3.5-probe：探针面板（默认隐藏，点「充电探针」才出现）
+	self.probeView = [[UITextView alloc] initWithFrame:CGRectMake(pad, top, w - pad * 2, 170)];
+	self.probeView.backgroundColor = [UIColor tertiarySystemBackgroundColor];
+	self.probeView.font = [UIFont monospacedSystemFontOfSize:9.0 weight:UIFontWeightRegular];
+	self.probeView.editable = NO;
+	self.probeView.selectable = YES;
+	self.probeView.layer.cornerRadius = 10;
+	self.probeView.textContainerInset = UIEdgeInsetsMake(6, 6, 6, 6);
+	self.probeView.hidden = YES;
+	self.probeView.autoresizingMask = UIViewAutoresizingFlexibleWidth;
+	[self.view addSubview:self.probeView];
 }
 
 - (UIButton *)makeButton:(NSString *)title y:(CGFloat)y color:(UIColor *)color
@@ -132,7 +157,7 @@
 - (void)refreshStatus
 {
 	NSMutableString *m = [NSMutableString string];
-	[m appendFormat:@"build = TrollReboot 3.4\n"];
+	[m appendFormat:@"build = TrollReboot 3.5-probe\n"];
 	[m appendFormat:@"app uid=%u euid=%u\n", getuid(), geteuid()];
 
 	[m appendString:@"\n"];
@@ -185,7 +210,104 @@
 
 - (void)refreshTapped { [self refreshStatus]; }
 
-- (void)copyTapped { [UIPasteboard generalPasteboard].string = self.statusView.text ?: @""; }
+- (void)copyTapped
+{
+	NSMutableString *all = [NSMutableString string];
+	if (self.probeView.text.length > 0)
+	{
+		[all appendString:@"=== 充电探针（只读）===\n"];
+		[all appendString:self.probeView.text];
+		[all appendString:@"\n\n"];
+	}
+	[all appendString:self.statusView.text ?: @""];
+	[UIPasteboard generalPasteboard].string = all;
+}
+
+#pragma mark - v3.5-probe 只读充电探针
+
+- (void)probeTapped
+{
+	if (self.probing)
+	{
+		[self stopProbe];
+		return;
+	}
+	[self startProbe];
+}
+
+- (void)startProbe
+{
+	self.probing = YES;
+	self.probeTicks = 0;
+	self.probeStart = time(NULL);
+	self.probeLines = [NSMutableArray array];
+	[self.probeButton setTitle:@"停止探针" forState:UIControlStateNormal];
+
+	CGFloat pad = 16.0;
+	CGFloat w = self.view.bounds.size.width;
+	CGFloat top = 334.0;
+	CGFloat probeH = 170.0;
+	self.probeView.hidden = NO;
+	self.probeView.frame = CGRectMake(pad, top, w - pad * 2, probeH);
+	self.statusView.frame = CGRectMake(pad, top + probeH + 8, w - pad * 2,
+	                                   self.view.bounds.size.height - (top + probeH + 8) - 16);
+	self.probeView.text = @"(第 1 秒采样中…)";
+
+	TRProbeLogAppend([NSString stringWithFormat:@"===== probe start %@", [NSDate date]]);
+	[self probeTick];
+
+	self.probeTimer = [NSTimer timerWithTimeInterval:1.0
+	                                          target:self
+	                                        selector:@selector(probeTick)
+	                                        userInfo:nil
+	                                         repeats:YES];
+	self.probeTimer.tolerance = 0.15;
+	[[NSRunLoop mainRunLoop] addTimer:self.probeTimer forMode:NSRunLoopCommonModes];
+}
+
+- (void)stopProbe
+{
+	if (!self.probing)
+		return;
+	self.probing = NO;
+	[self.probeTimer invalidate];
+	self.probeTimer = nil;
+	[self.probeButton setTitle:@"充电探针" forState:UIControlStateNormal];
+
+	CGFloat pad = 16.0;
+	CGFloat w = self.view.bounds.size.width;
+	CGFloat top = 334.0;
+	self.probeView.hidden = YES;
+	self.statusView.frame = CGRectMake(pad, top, w - pad * 2,
+	                                   self.view.bounds.size.height - top - 16);
+
+	TRProbeLogAppend(@"===== probe stop");
+	[self refreshStatus];
+}
+
+- (void)probeTick
+{
+	if (!self.probing)
+		return;
+
+	self.probeTicks++;
+	NSDictionary *s = TRBatteryRead();
+	NSString *line = [NSString stringWithFormat:@"#%ld %@", (long)self.probeTicks, TRBatteryLine(s)];
+
+	// 每秒都落盘（fsync），重启/崩溃也不丢采样
+	TRProbeLogAppend(line);
+
+	[self.probeLines addObject:line];
+	if (self.probeLines.count > 150)
+		[self.probeLines removeObjectAtIndex:0];
+
+	NSString *elapsed = [NSString stringWithFormat:@"探针中 · 已 %ld 秒 · 阈值|电流|<50mA · 日志 Documents/charge-probe.log",
+	                                                     (long)(time(NULL) - self.probeStart)];
+	NSString *body = [self.probeLines componentsJoinedByString:@"\n"];
+	// 首行放状态条，便于一眼看到在跑
+	self.probeView.text = [NSString stringWithFormat:@"%@\n%@", elapsed, body];
+	[self.probeView scrollRangeToVisible:NSMakeRange(self.probeView.text.length, 0)];
+}
 
 - (void)enableDaemonTapped
 {
