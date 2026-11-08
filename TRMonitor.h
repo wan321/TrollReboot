@@ -22,11 +22,12 @@
 #define TRMON_SAMPLE_SEC 10     // 采样间隔（秒）
 
 /// 写死的安全约束
-#define TRMON_COOLDOWN_SEC (30 * 60)   // 两次重启之间至少 30 分钟
-#define TRMON_MAX_PER_HOUR 2           // 每小时最多 2 次
-#define TRMON_MAX_PER_DAY 5            // 24 小时最多 5 次
-#define TRMON_MAX_PER_BOOT 1           // 一次开机最多 1 次
-#define TRMON_BREAKER_COUNT 3          // 连续 3 次后熔断，需人工重置
+#define TRMON_COOLDOWN_SEC (15 * 60)   // 两次重启之间至少 15 分钟
+#define TRMON_MAX_PER_HOUR 3           // 每小时最多 3 次
+#define TRMON_MAX_PER_DAY 8            // 24 小时最多 8 次
+#define TRMON_MAX_PER_BOOT 3           // 一次开机最多 3 次（与熔断阈值一致）
+#define TRMON_BREAKER_COUNT 3          // 连续 3 次自动重启后条件仍在 → 判故障，停止自动重启
+#define TRMON_GRACE_SEC 60             // 电流短暂恢复的容忍窗口（秒），超过才清零
 
 /// 配置文件路径（只有 root 守护写得到）；里面只存一个数字
 NSString *TRMonitorConfigPath(void);
@@ -43,7 +44,8 @@ NSDictionary *TRMonitorStateLoad(void);
 BOOL TRMonitorStateWrite(NSDictionary *state);
 
 /// 单次采样是否满足全部联合条件；不满足时 reason 说明原因（只判断，不动手）
-BOOL TRMonitorSampleIsStuck(NSDictionary *sample, NSString **reason);
+/// softOnly：只有「电流恢复」这一条不满足（其它硬条件都满足）时为 YES，调用方应走容忍窗口而不是立即清零
+BOOL TRMonitorSampleIsStuck(NSDictionary *sample, NSString **reason, BOOL *softOnly);
 
 /// 现在能不能真的重启；不能时返回原因，能返回 nil
 NSString *TRMonitorSafetyBlock(NSDictionary *state);

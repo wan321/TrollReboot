@@ -20,7 +20,7 @@
  * 所有需要 root 的动作都在守护里做，App 只负责显示。
  */
 
-#define TR_BUILD_TAG @"TrollReboot 3.5-mon"
+#define TR_BUILD_TAG @"TrollReboot 3.5-mon2"
 
 static NSString *TRDeviceName(void)
 {
@@ -81,9 +81,13 @@ static double TRMemoryUsageMB(void)
 @property (nonatomic, strong) UITextView *logView;
 @property (nonatomic, strong) UIButton *clipboardButton;
 @property (nonatomic, strong) UIButton *rebootButton;
-@property (nonatomic, strong) UIButton *monitorButton;
+@property (nonatomic, strong) UITextField *monitorField;
 @property (nonatomic, assign) NSInteger monitorMinutes;
 @property (nonatomic, copy) NSString *monitorNote;
+	@property (nonatomic, copy) NSString *monitorBlocked;
+	@property (nonatomic, assign) NSInteger monitorPerBoot;
+	@property (nonatomic, assign) NSInteger monitorPerHour;
+	@property (nonatomic, assign) NSInteger monitorPerDay;
 
 @property (nonatomic, strong) NSTimer *probeTimer;
 @property (nonatomic, strong) NSMutableArray<NSString *> *logLines;
@@ -172,17 +176,41 @@ static double TRMemoryUsageMB(void)
 	[self.view addSubview:self.rebootButton];
 	y += 44 + 8;
 
-	// v3.5-mon：唯一的可调项——连续多少分钟算卡死
-	self.monitorButton = [UIButton buttonWithType:UIButtonTypeSystem];
-	self.monitorButton.frame = CGRectMake(pad, y, w - pad * 2, 40);
-	[self.monitorButton setTitle:@"卡死分钟数：5 分钟（点我修改）" forState:UIControlStateNormal];
-	[self.monitorButton setTitleColor:[UIColor colorWithWhite:0.92 alpha:1.0] forState:UIControlStateNormal];
-	self.monitorButton.titleLabel.font = [UIFont systemFontOfSize:15 weight:UIFontWeightMedium];
-	self.monitorButton.layer.borderColor = [UIColor colorWithWhite:0.45 alpha:1.0].CGColor;
-	self.monitorButton.layer.borderWidth = 1.0;
-	self.monitorButton.layer.cornerRadius = 20;
-	[self.monitorButton addTarget:self action:@selector(monitorTapped) forControlEvents:UIControlEventTouchUpInside];
-	[self.view addSubview:self.monitorButton];
+	// v3.5-mon：唯一的可调项 —— 电流持续为零 [__] 分钟 重启
+	UILabel *prefixLabel = [[UILabel alloc] initWithFrame:CGRectMake(pad, y, 118, 40)];
+	prefixLabel.text = @"电流持续为零";
+	prefixLabel.textColor = [UIColor colorWithWhite:0.92 alpha:1.0];
+	prefixLabel.font = [UIFont systemFontOfSize:16 weight:UIFontWeightMedium];
+	[self.view addSubview:prefixLabel];
+
+	self.monitorField = [[UITextField alloc] initWithFrame:CGRectMake(pad + 118, y + 6, 56, 28)];
+	self.monitorField.text = [NSString stringWithFormat:@"%ld", (long)TRMonitorStuckMinutes()];
+	self.monitorField.textColor = [UIColor whiteColor];
+	self.monitorField.backgroundColor = [UIColor colorWithWhite:0.16 alpha:1.0];
+	self.monitorField.font = [UIFont monospacedSystemFontOfSize:17 weight:UIFontWeightMedium];
+	self.monitorField.textAlignment = NSTextAlignmentCenter;
+	self.monitorField.keyboardType = UIKeyboardTypeNumberPad;
+	self.monitorField.layer.cornerRadius = 6;
+	self.monitorField.layer.borderWidth = 1.0;
+	self.monitorField.layer.borderColor = [UIColor colorWithWhite:0.45 alpha:1.0].CGColor;
+	[self.view addSubview:self.monitorField];
+
+	UILabel *unitLabel = [[UILabel alloc] initWithFrame:CGRectMake(pad + 118 + 62, y, 34, 40)];
+	unitLabel.text = @"分钟";
+	unitLabel.textColor = [UIColor colorWithWhite:0.92 alpha:1.0];
+	unitLabel.font = [UIFont systemFontOfSize:16 weight:UIFontWeightMedium];
+	[self.view addSubview:unitLabel];
+
+	UIButton *saveBtn = [UIButton buttonWithType:UIButtonTypeSystem];
+	saveBtn.frame = CGRectMake(w - pad - 62, y + 6, 62, 28);
+	[saveBtn setTitle:@"保存" forState:UIControlStateNormal];
+	[saveBtn setTitleColor:[UIColor colorWithRed:0.29 green:0.87 blue:0.31 alpha:1.0] forState:UIControlStateNormal];
+	saveBtn.titleLabel.font = [UIFont systemFontOfSize:16 weight:UIFontWeightSemibold];
+	saveBtn.layer.borderColor = [UIColor colorWithRed:0.29 green:0.87 blue:0.31 alpha:1.0].CGColor;
+	saveBtn.layer.borderWidth = 1.2;
+	saveBtn.layer.cornerRadius = 14;
+	[saveBtn addTarget:self action:@selector(saveTapped) forControlEvents:UIControlEventTouchUpInside];
+	[self.view addSubview:saveBtn];
 	y += 40 + 8;
 
 	self.logView = [[UITextView alloc] initWithFrame:CGRectMake(pad, y, w - pad * 2, logH)];
@@ -394,13 +422,28 @@ static double TRMemoryUsageMB(void)
 	[m appendFormat:@"\n"];
 	[m appendFormat:@"探针：运行中（第 %ld 秒）\n", (long)tick];
 	[m appendFormat:@"%@\n", TRMonitorVerdict(s)];
+	[m appendFormat:@"监控状态：%@\n", self.monitorNote.length ? self.monitorNote : @"未开始"];
+	[m appendFormat:@"自动重启：本次开机 %ld 次 / 近 1 小时 %ld 次 / 近 24 小时 %ld 次（冷却 %.0f 分钟、每小时≤%d、每天≤%d）\n", (long)self.monitorPerBoot, (long)self.monitorPerHour, (long)self.monitorPerDay, TRMON_COOLDOWN_SEC / 60.0, TRMON_MAX_PER_HOUR, TRMON_MAX_PER_DAY];
+	if (self.monitorBlocked.length > 0)
+		[m appendFormat:@"⚠ 已停止自动重启：%@\n", self.monitorBlocked];
+	else
+		[m appendFormat:@"🟢 自动重启：可用\n"];
 
 	if (rawMax)
 		[m appendFormat:@"满容量：%ld mAh\n", (long)[rawMax integerValue]];
 
 	[m appendFormat:@"版本：%@\n", TR_BUILD_TAG];
 
-	self.infoView.text = m;
+	// 普通行白色，「⚠ 已停止自动重启」整行标红
+	NSMutableAttributedString *as = [[NSMutableAttributedString alloc] initWithString:m attributes:@{ NSFontAttributeName : [UIFont monospacedSystemFontOfSize:13 weight:UIFontWeightRegular], NSForegroundColorAttributeName : [UIColor whiteColor] }];
+	NSRange warn = [m rangeOfString:@"⚠ 已停止自动重启"];
+	if (warn.location != NSNotFound)
+	{
+		NSRange lineEnd = [m rangeOfString:@"\n" options:0 range:NSMakeRange(warn.location, m.length - warn.location)];
+		NSRange r = lineEnd.location == NSNotFound ? NSMakeRange(warn.location, m.length - warn.location) : NSMakeRange(warn.location, lineEnd.location - warn.location);
+		[as addAttribute:NSForegroundColorAttributeName value:[UIColor colorWithRed:1.0 green:0.35 blue:0.31 alpha:1.0] range:r];
+	}
+	self.infoView.attributedText = as;
 
 	// 采样也落盘（fsync），App 被杀也不丢
 	if (tick % 5 == 1)
@@ -416,14 +459,20 @@ static double TRMemoryUsageMB(void)
 		NSString *text = TRDaemonRequest(@"/monitor");
 		NSInteger minutes = 0;
 		NSString *note = @"守护未响应";
+		NSString *blocked = @"";
+		NSInteger perHour = 0, perDay = 0, perBoot = 0;
 		if ([text hasPrefix:@"{"])
 		{
-			NSDictionary *j = [NSJSONSerialization JSONObjectWithData:[text dataUsingEncoding:NSUTF8StringEncoding]
-			                                                 options:0
-			                                                   error:NULL];
+			NSDictionary *j = [NSJSONSerialization JSONObjectWithData:[text dataUsingEncoding:NSUTF8StringEncoding] options:0 error:NULL];
 			if ([j isKindOfClass:[NSDictionary class]])
 			{
 				minutes = [j[@"minutes"] integerValue];
+				blocked = j[@"blocked"] ?: @"";
+				perHour = [j[@"perHour"] integerValue];
+				perDay = [j[@"perDay"] integerValue];
+				NSDictionary *stj = j[@"state"];
+				if ([stj isKindOfClass:[NSDictionary class]])
+					perBoot = [stj[@"rebootCountBoot"] integerValue];
 				NSString *n = j[@"note"];
 				if ([n isKindOfClass:[NSString class]] && n.length > 0)
 					note = n;
@@ -435,13 +484,19 @@ static double TRMemoryUsageMB(void)
 			TRMonitorSetCachedMinutes(minutes);
 
 		dispatch_async(dispatch_get_main_queue(), ^{
-			RootViewController *s = weakSelf;
-			if (s == nil)
+			RootViewController *s2 = weakSelf;
+			if (s2 == nil)
 				return;
-			s.monitorMinutes = minutes;
-			s.monitorNote = note;
-			[s updateMonitorButton];
-			[s appendLog:[NSString stringWithFormat:@"监控：%@（连续 %ld 分钟算卡死）", note, (long)(minutes > 0 ? minutes : TRMonitorStuckMinutes())]];
+			s2.monitorMinutes = minutes;
+			s2.monitorNote = note;
+			s2.monitorBlocked = blocked;
+			s2.monitorPerHour = perHour;
+			s2.monitorPerDay = perDay;
+			s2.monitorPerBoot = perBoot;
+			[s2 updateMonitorButton];
+			[s2 appendLog:[NSString stringWithFormat:@"监控：%@（阈值 %ld 分钟）", note, (long)(minutes > 0 ? minutes : TRMonitorStuckMinutes())]];
+			if (blocked.length > 0)
+				[s2 appendLog:[NSString stringWithFormat:@"⚠ 已停止自动重启：%@", blocked]];
 		});
 	});
 }
@@ -451,33 +506,14 @@ static double TRMemoryUsageMB(void)
 	NSInteger m = self.monitorMinutes;
 	if (m <= 0)
 		m = TRMonitorStuckMinutes();
-	NSString *title = [NSString stringWithFormat:@"卡死分钟数：%ld 分钟（点我修改）", (long)m];
-	[self.monitorButton setTitle:title forState:UIControlStateNormal];
+	if (![self.monitorField isFirstResponder])
+		self.monitorField.text = [NSString stringWithFormat:@"%ld", (long)m];
 }
 
-- (void)monitorTapped
+- (void)saveTapped
 {
-	NSInteger cur = self.monitorMinutes;
-	if (cur <= 0)
-		cur = TRMonitorStuckMinutes();
-
-	UIAlertController *ac = [UIAlertController alertControllerWithTitle:@"卡死分钟数"
-	                                                            message:@"连续这么多分钟电流为 0 且满足其它条件才会重启（1–60）"
-	                                                     preferredStyle:UIAlertControllerStyleAlert];
-	[ac addTextFieldWithConfigurationHandler:^(UITextField *tf) {
-		tf.text = [NSString stringWithFormat:@"%ld", (long)cur];
-		tf.keyboardType = UIKeyboardTypeNumberPad;
-		tf.textAlignment = NSTextAlignmentCenter;
-	}];
-	__weak typeof(self) weakSelf = self;
-	[ac addAction:[UIAlertAction actionWithTitle:@"取消" style:UIAlertActionStyleCancel handler:nil]];
-	[ac addAction:[UIAlertAction actionWithTitle:@"保存"
-	                                       style:UIAlertActionStyleDefault
-	                                     handler:^(UIAlertAction *a) {
-		                                     NSString *v = ac.textFields.firstObject.text;
-		                                     [weakSelf saveMinutes:[v integerValue]];
-	                                     }]];
-	[self presentViewController:ac animated:YES completion:nil];
+	[self.monitorField resignFirstResponder];
+	[self saveMinutes:[self.monitorField.text integerValue]];
 }
 
 - (void)saveMinutes:(NSInteger)minutes
@@ -487,7 +523,7 @@ static double TRMemoryUsageMB(void)
 	if (minutes > TRMON_MINUTES_MAX)
 		minutes = TRMON_MINUTES_MAX;
 
-	[self appendLog:[NSString stringWithFormat:@"设置卡死分钟数 → %ld", (long)minutes]];
+	[self appendLog:[NSString stringWithFormat:@"设置：电流持续为零 %ld 分钟 → 重启", (long)minutes]];
 	__weak typeof(self) weakSelf = self;
 	dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
 		NSString *path = [NSString stringWithFormat:@"/monitor/set?minutes=%ld", (long)minutes];
@@ -508,7 +544,7 @@ static double TRMemoryUsageMB(void)
 				s.monitorMinutes = minutes;
 			TRMonitorSetCachedMinutes(s.monitorMinutes);
 			[s updateMonitorButton];
-			[s appendLog:[NSString stringWithFormat:@"已生效：连续 %ld 分钟卡死才重启", (long)s.monitorMinutes]];
+			[s appendLog:[NSString stringWithFormat:@"已生效：电流持续为零 %ld 分钟才重启", (long)s.monitorMinutes]];
 			[s reloadMonitor];
 		});
 	});

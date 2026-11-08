@@ -141,10 +141,12 @@ double TRMonitorCurrentBootTime(void)
 	return (double)boot.tv_sec;
 }
 
-BOOL TRMonitorSampleIsStuck(NSDictionary *s, NSString **reason)
+BOOL TRMonitorSampleIsStuck(NSDictionary *s, NSString **reason, BOOL *softOnly)
 {
 	if (reason)
 		*reason = nil;
+	if (softOnly)
+		*softOnly = NO;
 
 	if (![s[@"ok"] boolValue])
 	{
@@ -169,7 +171,36 @@ BOOL TRMonitorSampleIsStuck(NSDictionary *s, NSString **reason)
 		return NO;
 	}
 
-	// ③ 电流必须真的接近 0（读不到不能当 0）
+	// ③ 电量没满
+	NSNumber *pct = s[@"percent"];
+	if (pct && [pct integerValue] >= 100)
+	{
+		if (reason)
+			*reason = @"电量已 100%";
+		return NO;
+	}
+
+	// ④ 没到满容量（满电停充属正常）
+	NSNumber *raw = s[@"rawCapacity"];
+	NSNumber *rawMax = s[@"rawMaxCapacity"];
+	if (raw && rawMax && [rawMax integerValue] > 0 && [raw integerValue] >= [rawMax integerValue])
+	{
+		if (reason)
+			*reason = @"已达满容量";
+		return NO;
+	}
+
+	// ⑤ 温度在合理区间（避免把高温停充当卡死）
+	NSNumber *t = s[@"tempC"];
+	if (t && ([t doubleValue] < TRMON_TEMP_MIN_C || [t doubleValue] > TRMON_TEMP_MAX_C))
+	{
+		if (reason)
+			*reason = [NSString stringWithFormat:@"温度 %.1f℃ 超出 %d–%d℃", [t doubleValue],
+		                                     TRMON_TEMP_MIN_C, TRMON_TEMP_MAX_C];
+		return NO;
+	}
+
+	// ⑥ 电流：到这一步其它硬条件都成立，电流恢复属「软恢复」，交给调用方的容忍窗口
 	NSNumber *cur = s[@"currentMA"];
 	if (cur == nil)
 	{
@@ -180,43 +211,15 @@ BOOL TRMonitorSampleIsStuck(NSDictionary *s, NSString **reason)
 	long mA = labs((long)[cur integerValue]);
 	if (mA >= TRMON_CURRENT_MA)
 	{
+		if (softOnly)
+			*softOnly = YES;
 		if (reason)
 			*reason = [NSString stringWithFormat:@"电流 %ldmA ≥ %dmA（说明在充）", mA, TRMON_CURRENT_MA];
 		return NO;
 	}
 
-	// ④ 电量没满
-	NSNumber *pct = s[@"percent"];
-	if (pct && [pct integerValue] >= 100)
-	{
-		if (reason)
-			*reason = @"电量已 100%";
-		return NO;
-	}
-
-	// ⑤ 没到满容量（满电停充属正常）
-	NSNumber *raw = s[@"rawCapacity"];
-	NSNumber *rawMax = s[@"rawMaxCapacity"];
-	if (raw && rawMax && [rawMax integerValue] > 0 && [raw integerValue] >= [rawMax integerValue])
-	{
-		if (reason)
-			*reason = @"已达满容量";
-		return NO;
-	}
-
-	// ⑥ 温度在合理区间（避免把高温停充当卡死）
-	NSNumber *t = s[@"tempC"];
-	if (t && ([t doubleValue] < TRMON_TEMP_MIN_C || [t doubleValue] > TRMON_TEMP_MAX_C))
-	{
-		if (reason)
-			*reason = [NSString stringWithFormat:@"温度 %.1f℃ 超出 %d–%d℃", [t doubleValue],
-			                                     TRMON_TEMP_MIN_C, TRMON_TEMP_MAX_C];
-		return NO;
-	}
-
 	return YES;
 }
-
 NSString *TRMonitorSafetyBlock(NSDictionary *st)
 {
 	double now = (double)time(NULL);

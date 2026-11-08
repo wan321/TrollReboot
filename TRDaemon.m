@@ -281,6 +281,7 @@ static NSString *TRBatteryReadIsolated(void)
 #pragma mark - v3.5-mon：充电卡死自动重启（条件写死，只开放分钟数）
 
 static double gMonStuckSec = 0;
+static double gMonGraceSec = 0;
 static NSString *gMonNote = @"未开始";
 static pthread_mutex_t gMonLock = PTHREAD_MUTEX_INITIALIZER;
 
@@ -331,34 +332,71 @@ static void *TRMonitorThread(void *arg)
 				continue;
 			}
 
+			BOOL soft = NO;
 			NSString *reason = nil;
-			BOOL stuck = TRMonitorSampleIsStuck(sample, &reason);
+			BOOL stuck = TRMonitorSampleIsStuck(sample, &reason, &soft);
+			BOOL powered = [sample[@"external"] boolValue];
 
-			// 没插充电器：绝不累计
-			if (![sample[@"external"] boolValue])
+			if (!powered)
 			{
+				// 拔电：立即清零（硬闸，宁漏报不误重启）
 				pthread_mutex_lock(&gMonLock);
 				gMonStuckSec = 0;
+				gMonGraceSec = 0;
 				pthread_mutex_unlock(&gMonLock);
 			}
 			else if (stuck)
 			{
 				pthread_mutex_lock(&gMonLock);
 				gMonStuckSec += TRMON_SAMPLE_SEC;
+				gMonGraceSec = 0;
+				pthread_mutex_unlock(&gMonLock);
+			}
+			else if (soft)
+			{
+				// 只有电流恢复（其它硬条件仍成立）：容忍 TRMON_GRACE_SEC 秒抖动
+				pthread_mutex_lock(&gMonLock);
+				if (gMonStuckSec > 0)
+				{
+					gMonGraceSec += TRMON_SAMPLE_SEC;
+					if (gMonGraceSec > TRMON_GRACE_SEC)
+					{
+						gMonStuckSec = 0;
+						gMonGraceSec = 0;
+					}
+				}
 				pthread_mutex_unlock(&gMonLock);
 			}
 			else
 			{
+				// 未在充电/满电/高温/读不到：立即清零
 				pthread_mutex_lock(&gMonLock);
 				gMonStuckSec = 0;
+				gMonGraceSec = 0;
 				pthread_mutex_unlock(&gMonLock);
+			}
+
+			// 恢复正常充电 → 熔断计数归零（「连续」才熔断）
+			if (powered && !stuck && !soft)
+			{
+				NSDictionary *st0 = TRMonitorStateLoad();
+				if ([st0[@"breaker"] integerValue] > 0)
+				{
+					NSMutableDictionary *m0 = [st0 mutableCopy];
+					m0[@"breaker"] = @0;
+					TRMonitorStateWrite(m0);
+					TRAppendLog(@"daemon.log", @"[monitor] 恢复正常充电，熔断计数已归零");
+				}
 			}
 
 			NSDictionary *live = TRMonLive();
 			double stuckSec = [live[@"stuckSec"] doubleValue];
 			TRMonSetNote(stuck ? [NSString stringWithFormat:@"卡死样 已累计 %ld 秒 / 需 %ld 秒",
 			                                             (long)stuckSec, (long)need]
-			                   : [NSString stringWithFormat:@"不满足：%@", reason ?: @"?"]);
+			                   : (soft && stuckSec > 0
+			                          ? [NSString stringWithFormat:@"电流短时恢复，容忍中（%ld 秒 / 需 %ld 秒）",
+			                                                       (long)stuckSec, (long)need]
+			                          : [NSString stringWithFormat:@"不满足：%@", reason ?: @"?"]));
 
 			if (stuck && stuckSec >= need)
 			{
@@ -423,6 +461,23 @@ static NSString *TRMonitorJSON(void)
 	out[@"conditions"] = TRMonitorConditionsText();
 	out[@"state"] = st;
 	out[@"bootTS"] = @(TRMonitorCurrentBootTime());
+	// 给 UI 标红用：安全约束原因 / 熔断次数 / 近 1 小时与 24 小时次数
+	NSString *block = TRMonitorSafetyBlock(st);
+	out[@"blocked"] = block ?: @"";
+	out[@"breaker"] = st[@"breaker"] ?: @0;
+
+	double now = (double)time(NULL);
+	NSInteger perHour = 0, perDay = 0;
+	for (NSNumber *n in (st[@"rebootTimes"] ?: @[]))
+	{
+		double dt = now - [n doubleValue];
+		if (dt <= 86400.0)
+			perDay++;
+		if (dt <= 3600.0)
+			perHour++;
+	}
+	out[@"perHour"] = @(perHour);
+	out[@"perDay"] = @(perDay);
 
 	NSData *d = [NSJSONSerialization dataWithJSONObject:out options:0 error:NULL];
 	return d ? [[NSString alloc] initWithData:d encoding:NSUTF8StringEncoding]
