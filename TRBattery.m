@@ -245,39 +245,61 @@ NSDictionary *TRBatteryRead(void)
 	int created = (int)merged.count;
 	if (merged == nil) merged = [NSMutableDictionary dictionary];
 
+	NSString *services = merged.count ? [merged.allKeys componentsJoinedByString:@","] : @"";
+	NSString *diagLink = linkErr ?: (created > 0 ? [NSString stringWithFormat:@"成功（服务：%@）", services] : @"没有返回任何服务");
+	NSString *diagDlopen = @"（未执行：直连已成功）";
+	NSString *diagPublic = @"（未使用：私有已成功）";
+
 	// ② 直连拿不到 → 退回 dlopen/dlsym（老路，保留兼容）
-	if (created == 0 && TRLoadIOKit())
+	if (created == 0)
 	{
-		mach_port_t masterPort = MACH_PORT_NULL;
-		if (gMasterPort)
+		if (TRLoadIOKit())
 		{
-			kern_return_t mkr = gMasterPort(MACH_PORT_NULL, &masterPort);
-			if (mkr != KERN_SUCCESS) masterPort = MACH_PORT_NULL;
+			mach_port_t masterPort = MACH_PORT_NULL;
+			NSString *mkrNote = @"";
+			if (gMasterPort)
+			{
+				kern_return_t mkr = gMasterPort(MACH_PORT_NULL, &masterPort);
+				if (mkr != KERN_SUCCESS)
+				{
+					masterPort = MACH_PORT_NULL;
+					mkrNote = [NSString stringWithFormat:@"IOMasterPort kr=%d；", (int)mkr];
+				}
+			}
+			for (size_t i = 0; i < sizeof(TRServiceNames) / sizeof(TRServiceNames[0]); i++)
+			{
+				CFMutableDictionaryRef matching = gServiceMatching(TRServiceNames[i]);
+				if (matching == NULL) continue;
+				// matching 被 IOServiceGetMatchingService 消费，不能再释放
+				io_service_t service = gGetMatchingService(masterPort, matching);
+				if (service == 0) continue;
+				CFMutableDictionaryRef props = NULL;
+				kern_return_t kr = gCreateCFProperties(service, &props, kCFAllocatorDefault, 0);
+				gObjectRelease(service);
+				if (kr != KERN_SUCCESS || props == NULL) continue;
+				NSDictionary *d = CFBridgingRelease(props);
+				if ([d isKindOfClass:[NSDictionary class]]) { merged[@(TRServiceNames[i])] = d; created++; }
+			}
+			services = merged.count ? [merged.allKeys componentsJoinedByString:@","] : @"";
+			diagDlopen = created > 0 ? [NSString stringWithFormat:@"%@成功（服务：%@）", mkrNote, services]
+			                         : [NSString stringWithFormat:@"%@没有返回任何服务", mkrNote];
 		}
-		for (size_t i = 0; i < sizeof(TRServiceNames) / sizeof(TRServiceNames[0]); i++)
+		else
 		{
-			CFMutableDictionaryRef matching = gServiceMatching(TRServiceNames[i]);
-			if (matching == NULL) continue;
-			// 同上：matching 被 IOServiceGetMatchingService 消费，不能再释放
-			io_service_t service = gGetMatchingService(masterPort, matching);
-			if (service == 0) continue;
-			CFMutableDictionaryRef props = NULL;
-			kern_return_t kr = gCreateCFProperties(service, &props, kCFAllocatorDefault, 0);
-			gObjectRelease(service);
-			if (kr != KERN_SUCCESS || props == NULL) continue;
-			NSDictionary *d = CFBridgingRelease(props);
-			if ([d isKindOfClass:[NSDictionary class]]) { merged[@(TRServiceNames[i])] = d; created++; }
+			diagDlopen = gIOKitError[0] ? @(gIOKitError) : @"dlopen IOKit 失败";
 		}
 	}
 
+	// ③ 私有全失败 → 公开电源 API 兜底
 	if (created == 0)
 	{
 		NSDictionary *pub = TRPublicPowerRead();
 		out[@"public"] = pub;
-		out[@"error"] = [NSString stringWithFormat:@"私有读不到（link: %@ | dlopen: %@）公开: %@",
-		                                           linkErr ?: @"-",
-		                                           gIOKitError[0] ? @(gIOKitError) : @"-",
-		                                           pub[@"error"] ?: @"ok"];
+		diagPublic = [pub[@"ok"] boolValue] ? @"成功（有公开电源信息）" : (pub[@"error"] ?: @"失败");
+		out[@"diagLink"] = diagLink;
+		out[@"diagDlopen"] = diagDlopen;
+		out[@"diagPublic"] = diagPublic;
+		out[@"error"] = [NSString stringWithFormat:@"私有读不到（link: %@ | dlopen: %@）公开: %@", diagLink, diagDlopen, diagPublic];
 		if ([pub[@"ok"] boolValue])
 		{
 			out[@"ok"] = @YES;
@@ -294,6 +316,9 @@ NSDictionary *TRBatteryRead(void)
 	out[@"ok"] = @YES;
 	out[@"properties"] = p;
 	out[@"services"] = [merged.allKeys componentsJoinedByString:@","];
+	out[@"diagLink"] = diagLink;
+	out[@"diagDlopen"] = diagDlopen;
+	out[@"diagPublic"] = diagPublic;
 
 	// 电流：两个服务里谁有就用谁（charger 的 Amperage 在快充时更贴近实际）
 	NSNumber *instant = TRNum(p[@"InstantAmperage"]);

@@ -20,7 +20,7 @@
  * 所有需要 root 的动作都在守护里做，App 只负责显示。
  */
 
-#define TR_BUILD_TAG @"TrollReboot 3.5-mon4-io2"
+#define TR_BUILD_TAG @"TrollReboot 3.5-mon4-io3"
 
 static NSString *TRDeviceName(void)
 {
@@ -383,7 +383,17 @@ static double TRMemoryUsageMB(void)
 
 	if (!ok)
 	{
-		self.infoView.text = [NSString stringWithFormat:@"读取失败：%@", s[@"error"] ?: @"?"];
+		self.infoView.text = [NSString stringWithFormat:
+			@"数据读取：失败（完全没有数据来源）\n"
+			@"\n读取诊断：\n"
+			@"  link:   %@\n"
+			@"  dlopen: %@\n"
+			@"  公开:   %@\n"
+			@"\n错误：%@\n版本：%@",
+			s[@"diagLink"] ?: @"（无）",
+			s[@"diagDlopen"] ?: @"（无）",
+			s[@"diagPublic"] ?: @"（无）",
+			s[@"error"] ?: @"?", TR_BUILD_TAG];
 		return;
 	}
 
@@ -414,10 +424,12 @@ static double TRMemoryUsageMB(void)
 		pct ? [NSString stringWithFormat:@"%ld%%", (long)[pct integerValue]] : @"?"];
 	[m appendFormat:@"插电状态：%@\n", [s[@"external"] boolValue] ? @"已连接充电器" : @"未插电"];
 	NSString *src = s[@"source"];
-	if (src.length > 0)
-		[m appendFormat:@"数据来源：%@\n", [src isEqualToString:@"public"] ? @"公开电源 API（无需私有权限）" : [NSString stringWithFormat:@"私有 IOKit/%@", src]];
-	if (s[@"error"] && [s[@"error"] length] > 0)
-		[m appendFormat:@"读取诊断：%@\n", s[@"error"]];
+	[m appendFormat:@"数据读取：成功\n"];
+	[m appendFormat:@"数据来源：%@\n", src.length == 0 ? @"（未标注）"
+		: ([src isEqualToString:@"public"] ? @"公开电源 API（无需私有权限）"
+		                                : [NSString stringWithFormat:@"私有 IOKit/%@", src])];
+	[m appendFormat:@"读取诊断：\n  link:   %@\n  dlopen: %@\n  公开:   %@\n",
+		s[@"diagLink"] ?: @"（无）", s[@"diagDlopen"] ?: @"（无）", s[@"diagPublic"] ?: @"（无）"];
 	[m appendFormat:@"内存占用估算：%.0f MB\n", TRMemoryUsageMB()];
 
 	NSDictionary *ds = TRDaemonStatus();
