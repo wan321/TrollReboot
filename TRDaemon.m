@@ -189,6 +189,7 @@ static int gPrivateFailCount = 0;
 static BOOL gPrivateThrottled = NO;
 static time_t gPrivateNextTry = 0;
 
+static NSString *TRBatteryReadIsolatedWithFormat(BOOL asJSON)
 {
 	if (gPrivateThrottled && time(NULL) < gPrivateNextTry)
 		return @"";
