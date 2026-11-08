@@ -1116,6 +1116,16 @@ int TRLauncherUninstallViaRoot(void)
 	return TRSpawnSelf(@[@"--uninstall-launcher"], NO);
 }
 
+BOOL TRLauncherIsInstalled(void)
+{
+	for (NSString *bid in TRLauncherHostBids())
+	{
+		NSString *bundle = TRFindBundleByIdentifier(bid);
+		if (bundle && TRBundleHasOurMarker(bundle)) return YES;
+	}
+	return NO;
+}
+
 NSString *TRLauncherStatusText(void)
 {
 	NSMutableString *m = [NSMutableString string];

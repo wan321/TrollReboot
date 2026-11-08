@@ -14,6 +14,7 @@
 @property (nonatomic, assign) BOOL busy;
 @property (nonatomic, assign) BOOL didAutoStart;
 @property (nonatomic, strong) NSURL *pendingURL;
+@property (nonatomic, copy) NSString *hbTestResult;
 @end
 
 @implementation RootViewController
@@ -32,7 +33,7 @@
 	CGFloat pad = 16.0;
 
 	self.titleLabel = [[UILabel alloc] initWithFrame:CGRectMake(pad, 48, w - pad * 2, 36)];
-	self.titleLabel.text = @"TrollReboot 3.4";
+	self.titleLabel.text = @"TrollReboot 3.5";
 	self.titleLabel.font = [UIFont boldSystemFontOfSize:28];
 	[self.view addSubview:self.titleLabel];
 
@@ -40,7 +41,7 @@
 	self.hintLabel.numberOfLines = 0;
 	self.hintLabel.font = [UIFont systemFontOfSize:11];
 	self.hintLabel.textColor = [UIColor secondaryLabelColor];
-	self.hintLabel.text = @"v3.4 宿主是「Watch」（原件自动备份，GTA Tracker 完全不碰）。\n重启与守护全部用我们自己的代码，不再执行 TrollStore 的任何可执行文件（对 TrollStore 只做只读路径扫描）。\n锁屏触发：快捷指令「获取 URL 内容」访问 http://127.0.0.1:8899/reboot";
+	self.hintLabel.text = @"v3.5 打开 App 先看最上面的「结论」：守护是否在线、pid、几秒前刷新、宿主是否已装。\n点「刷新」会自动取两次心跳（间隔 8 秒）对比，不用自己记数字。\n锁屏触发：快捷指令「获取 URL 内容」访问 http://127.0.0.1:8899/reboot";
 	[self.view addSubview:self.hintLabel];
 
 	self.daemonButton = [self makeButton:@"① 启用后台守护（当前开机周期内生效）" y:142 color:[UIColor systemBlueColor]];
@@ -113,7 +114,33 @@
 - (void)refreshStatus
 {
 	NSMutableString *m = [NSMutableString string];
-	[m appendFormat:@"build = TrollReboot 3.4\n"];
+
+	// === 结论区（放最前面，避免被日志挤到看不见）===
+	NSDictionary *stTop = TRDaemonStatus();
+	NSString *hbTop = [stTop[@"heartbeat"] stringByTrimmingCharactersInSet:
+		[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+	BOOL onlineTop = [stTop[@"online"] boolValue];
+	NSString *pidText = @"?";
+	NSRange pidRange = [hbTop rangeOfString:@"pid="];
+	if (pidRange.location != NSNotFound)
+	{
+		NSString *rest = [hbTop substringFromIndex:NSMaxRange(pidRange)];
+		NSRange sp = [rest rangeOfString:@" "];
+		pidText = (sp.location == NSNotFound) ? rest : [rest substringToIndex:sp.location];
+	}
+	NSString *ageText = stTop[@"age"] ? [stTop[@"age"] stringValue] : @"?";
+	[m appendString:@"=== 结论 ===\n"];
+	if (hbTop.length == 0)
+		[m appendFormat:@"守护：❌ 没有心跳文件（守护从没起来过）\n"];
+	else if (onlineTop)
+		[m appendFormat:@"守护：✅ 在线（pid=%@，%@ 秒前刚刷新）\n", pidText, ageText];
+	else
+		[m appendFormat:@"守护：❌ 没在跑（pid=%@，上次心跳 %@ 秒前）\n", pidText, ageText];
+	[m appendFormat:@"宿主 Watch：%@\n", TRLauncherIsInstalled() ? @"✅ 已是启动器" : @"未安装"];
+	if (self.hbTestResult.length) [m appendFormat:@"%@\n", self.hbTestResult];
+	[m appendString:@"=============\n\n"];
+
+	[m appendFormat:@"build = TrollReboot 3.5\n"];
 	[m appendFormat:@"app uid=%u euid=%u\n", getuid(), geteuid()];
 
 	[m appendString:@"\n"];
@@ -147,7 +174,7 @@
 	[m appendString:TRDaemonLogTail(8)];
 
 	self.statusView.text = m;
-	[self.statusView scrollRangeToVisible:NSMakeRange(self.statusView.text.length, 0)];
+	[self.statusView scrollRangeToVisible:NSMakeRange(0, 0)];
 
 	NSFileManager *fm = [NSFileManager defaultManager];
 	NSString *dir = [NSHomeDirectory() stringByAppendingPathComponent:@"Documents"];
@@ -164,7 +191,37 @@
 	[self.statusView scrollRangeToVisible:NSMakeRange(self.statusView.text.length, 0)];
 }
 
-- (void)refreshTapped { [self refreshStatus]; }
+- (long long)currentHeartbeatTs
+{
+	NSString *hb = TRDaemonStatus()[@"heartbeat"];
+	NSRange r = [hb rangeOfString:@"ts="];
+	if (r.location == NSNotFound) return 0;
+	return [[hb substringFromIndex:NSMaxRange(r)] longLongValue];
+}
+
+- (void)refreshTapped
+{
+	long long before = [self currentHeartbeatTs];
+	self.hbTestResult = @"心跳测试：已取第一次采样，8 秒后自动对比…";
+	[self refreshStatus];
+
+	__weak typeof(self) weakSelf = self;
+	dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(8 * NSEC_PER_SEC)),
+		dispatch_get_main_queue(), ^{
+		RootViewController *s = weakSelf;
+		if (!s) return;
+		long long after = [s currentHeartbeatTs];
+		if (before > 0 && after > before)
+			s.hbTestResult = [NSString stringWithFormat:
+				@"心跳测试：ts %lld → %lld ✅ 在刷新（+%lld 秒）", before, after, after - before];
+		else if (after > 0)
+			s.hbTestResult = [NSString stringWithFormat:
+				@"心跳测试：ts %lld → %lld ❌ 8 秒内没有新心跳", before, after];
+		else
+			s.hbTestResult = @"心跳测试：读不到心跳文件 ❌";
+		[s refreshStatus];
+	});
+}
 
 - (void)copyTapped { [UIPasteboard generalPasteboard].string = self.statusView.text ?: @""; }
 

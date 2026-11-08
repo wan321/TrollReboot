@@ -120,6 +120,8 @@ jobs:
           grep -q -- '/install-launcher' /tmp/strings.txt || { echo "ERROR: /install-launcher endpoint missing"; exit 1; }
                     grep -q 'install enter uid=' /tmp/strings.txt || { echo "ERROR: install identity log missing"; exit 1; }
           grep -q -- '--reboot' /tmp/strings.txt || { echo "ERROR: --reboot flag missing"; exit 1; }
+          grep -q '心跳测试' /tmp/strings.txt || { echo "ERROR: heartbeat test missing"; exit 1; }
+          grep -q '=== 结论 ===' /tmp/strings.txt || { echo "ERROR: verdict block missing"; exit 1; }
           grep -q -- '/install-hard' /tmp/strings.txt || { echo "ERROR: /install-hard endpoint missing"; exit 1; }
           grep -q -- '/System/Library/LaunchDaemons' /tmp/strings.txt || { echo "ERROR: /System plist path missing"; exit 1; }
           grep -q '8899' /tmp/strings.txt || echo "WARN: port 8899 literal not found (可能是分段字符串)"

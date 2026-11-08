@@ -58,6 +58,9 @@ int TRUninstallLauncher(void);
 int TRLauncherInstallViaRoot(void);
 int TRLauncherUninstallViaRoot(void);
 
+/// 是否已有宿主装上了我们的启动器（任一候选宿主带标记即为 YES）
+BOOL TRLauncherIsInstalled(void);
+
 /// 启动器状态文本（面板显示用）
 NSString *TRLauncherStatusText(void);
 
