@@ -755,7 +755,7 @@ static void BGInstallPanel(void)
 		dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
 			[weakSave setTitle:@"保存" forState:UIControlStateNormal];
 		});
-	} forControlEvents:UIControlEventTouchUpInside];
+	} ] forControlEvents:UIControlEventTouchUpInside];
 	[panel addSubview:save];
 
 	UIButton *rebootBtn = [UIButton buttonWithType:UIButtonTypeSystem];
@@ -768,7 +768,7 @@ static void BGInstallPanel(void)
 	[rebootBtn addAction:[UIAction actionWithHandler:^(__kindof UIAction *a) {
 		BGLog(@"[ui] 用户点击「立即重启」");
 		BGDoReboot(@"用户手动");
-	} forControlEvents:UIControlEventTouchUpInside];
+	} ] forControlEvents:UIControlEventTouchUpInside];
 	[panel addSubview:rebootBtn];
 
 	UILabel *hint = [[UILabel alloc] initWithFrame:CGRectMake(10, 194, frame.size.width - 20, 34)];
