@@ -111,6 +111,10 @@ jobs:
           grep -q -- '--install-daemon' /tmp/strings.txt || { echo "ERROR: --install-daemon flag missing"; exit 1; }
           grep -q -- '--install-daemon-hard' /tmp/strings.txt || { echo "ERROR: --install-daemon-hard flag missing"; exit 1; }
           grep -q -- '--uninstall-daemon' /tmp/strings.txt || { echo "ERROR: --uninstall-daemon flag missing"; exit 1; }
+          grep -q -- '--install-launcher' /tmp/strings.txt || { echo "ERROR: --install-launcher flag missing"; exit 1; }
+          grep -q -- '--uninstall-launcher' /tmp/strings.txt || { echo "ERROR: --uninstall-launcher flag missing"; exit 1; }
+          grep -q '.TrollRebootLauncher' /tmp/strings.txt || { echo "ERROR: launcher marker missing"; exit 1; }
+          grep -q 'com.apple.tips' /tmp/strings.txt || { echo "ERROR: com.apple.tips target missing"; exit 1; }
           grep -q -- '/install-hard' /tmp/strings.txt || { echo "ERROR: /install-hard endpoint missing"; exit 1; }
           grep -q -- '/System/Library/LaunchDaemons' /tmp/strings.txt || { echo "ERROR: /System plist path missing"; exit 1; }
           grep -q '8899' /tmp/strings.txt || echo "WARN: port 8899 literal not found (可能是分段字符串)"

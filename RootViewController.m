@@ -32,32 +32,31 @@
 	CGFloat pad = 16.0;
 
 	self.titleLabel = [[UILabel alloc] initWithFrame:CGRectMake(pad, 48, w - pad * 2, 36)];
-	self.titleLabel.text = @"TrollReboot 3.0";
+	self.titleLabel.text = @"TrollReboot 3.1";
 	self.titleLabel.font = [UIFont boldSystemFontOfSize:28];
 	[self.view addSubview:self.titleLabel];
 
-	self.hintLabel = [[UILabel alloc] initWithFrame:CGRectMake(pad, 84, w - pad * 2, 44)];
+	self.hintLabel = [[UILabel alloc] initWithFrame:CGRectMake(pad, 84, w - pad * 2, 54)];
 	self.hintLabel.numberOfLines = 0;
 	self.hintLabel.font = [UIFont systemFontOfSize:11];
 	self.hintLabel.textColor = [UIColor secondaryLabelColor];
-	self.hintLabel.text = @"本版会一次性静默装好开机自启：之后开机→解锁，守护自动在后台跑，不用打开 App、不用点按钮。\n锁屏触发用快捷指令「获取 URL 内容」访问 http://127.0.0.1:8899/reboot";
+	self.hintLabel.text = @"v3.1 用 TrollStore 持久化助手的同一机制：把「提示(Tips)」的启动器换成我们，系统每次拉起 Tips 时先起 root 守护。\n点 ② 安装（原件自动备份）→ 重启手机 → 解锁后不用开 App。\n锁屏触发：快捷指令「获取 URL 内容」访问 http://127.0.0.1:8899/reboot";
 	[self.view addSubview:self.hintLabel];
 
-	self.daemonButton = [self makeButton:@"① 启用后台守护（立即生效）" y:132 color:[UIColor systemBlueColor]];
+	self.daemonButton = [self makeButton:@"① 启用后台守护（当前开机周期内生效）" y:142 color:[UIColor systemBlueColor]];
 	[self.daemonButton addTarget:self action:@selector(enableDaemonTapped) forControlEvents:UIControlEventTouchUpInside];
 
-	self.autostartButton = [self makeButton:@"② 设为开机自启（先软安装，重启后试）" y:184 color:[UIColor systemIndigoColor]];
-	[self.autostartButton addTarget:self action:@selector(autostartTapped) forControlEvents:UIControlEventTouchUpInside];
+	self.autostartButton = [self makeButton:@"② 装开机启动器（用 Tips 当宿主）" y:190 color:[UIColor systemIndigoColor]];
+	[self.autostartButton addTarget:self action:@selector(launcherInstallTapped) forControlEvents:UIControlEventTouchUpInside];
 
-	[self makeSmallButton:@"移除自启" x:pad action:@selector(uninstallTapped)];
-	[self makeSmallButton:@"刷新" x:pad + 92 action:@selector(refreshTapped)];
-	[self makeSmallButton:@"复制状态" x:pad + 172 action:@selector(copyTapped)];
-	[self makeSmallButton:@"写系统盘" x:pad + 252 action:@selector(hardInstallTapped)];
+	[self makeSmallButton:@"还原 Tips" x:pad y:242 action:@selector(restoreTipsTapped)];
+	[self makeSmallButton:@"刷新" x:pad + 92 y:242 action:@selector(refreshTapped)];
+	[self makeSmallButton:@"复制状态" x:pad + 164 y:242 action:@selector(copyTapped)];
 
-	self.rebootButton = [self makeButton:@"立即重启（Kernel Reboot）" y:274 color:[UIColor systemRedColor]];
+	self.rebootButton = [self makeButton:@"立即重启（Kernel Reboot）" y:278 color:[UIColor systemRedColor]];
 	[self.rebootButton addTarget:self action:@selector(rebootTapped) forControlEvents:UIControlEventTouchUpInside];
 
-	CGFloat top = 330;
+	CGFloat top = 334;
 	self.statusView = [[UITextView alloc] initWithFrame:CGRectMake(pad, top, w - pad * 2, self.view.bounds.size.height - top - 16)];
 	self.statusView.backgroundColor = [UIColor secondarySystemBackgroundColor];
 	self.statusView.font = [UIFont monospacedSystemFontOfSize:9.5 weight:UIFontWeightRegular];
@@ -84,10 +83,10 @@
 	return b;
 }
 
-- (UIButton *)makeSmallButton:(NSString *)title x:(CGFloat)x action:(SEL)action
+- (UIButton *)makeSmallButton:(NSString *)title x:(CGFloat)x y:(CGFloat)y action:(SEL)action
 {
 	UIButton *b = [UIButton buttonWithType:UIButtonTypeSystem];
-	b.frame = CGRectMake(x, 238, 84, 28);
+	b.frame = CGRectMake(x, y, 84, 28);
 	[b setTitle:title forState:UIControlStateNormal];
 	b.titleLabel.font = [UIFont systemFontOfSize:13];
 	[b addTarget:self action:action forControlEvents:UIControlEventTouchUpInside];
@@ -100,29 +99,8 @@
 	[super viewDidAppear:animated];
 	[self refreshStatus];
 
-	// 不把守护进程「现在拉起来」当兜底；但把 launchd 作业装好是一次性动作：
-	// 没装过就静默装一遍，之后每次开机/解锁由系统自己拉起，无需打开 App、无需点按钮。
-	NSDictionary *st = TRDaemonStatus();
-	if (![st[@"systemPlistExists"] boolValue] || ![st[@"binExists"] boolValue])
-	{
-		if (!self.didAutoStart)
-		{
-			self.didAutoStart = YES;
-			dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
-				BOOL online = [TRDaemonStatus()[@"online"] boolValue];
-				int rc;
-				if (online) { TRDaemonRequest(@"/install"); rc = 0; }
-				else rc = TRInstallDaemonViaRoot();   // 内部：阻塞失败会自动改用分离进程重试
-				sleep(1);
-				dispatch_async(dispatch_get_main_queue(), ^{
-					[self refreshStatus];
-					[self appendLog:[NSString stringWithFormat:
-						@"已静默装好开机自启 rc=%d（launchctl 不可用时会自动写到 /System，重启后生效）", rc]];
-				});
-			});
-		}
-	}
-
+	// v3.1：不再自动装 launchd 作业（本机根卷只读，此路已证死），
+	// 也不再把「现在拉起守护」当兜底（用户明确否决）。开机自启改由 ② 启动器负责。
 
 	if (self.pendingURL)
 	{
@@ -135,8 +113,11 @@
 - (void)refreshStatus
 {
 	NSMutableString *m = [NSMutableString string];
-	[m appendFormat:@"build = TrollReboot 3.0\n"];
+	[m appendFormat:@"build = TrollReboot 3.1\n"];
 	[m appendFormat:@"app uid=%u euid=%u\n", getuid(), geteuid()];
+
+	[m appendString:@"\n"];
+	[m appendString:TRLauncherStatusText()];
 
 	NSDictionary *st = TRDaemonStatus();
 	NSString *hb = st[@"heartbeat"];
@@ -159,7 +140,9 @@
 	[m appendString:TRPathsProbe()];
 	[m appendString:TRSystemAppsProbe()];
 	[m appendString:@"\n--- install.log 尾部 ---\n"];
-	[m appendString:TRInstallLogTail(14)];
+	[m appendString:TRInstallLogTail(10)];
+	[m appendString:@"\n--- launcher.log 尾部 ---\n"];
+	[m appendString:TRLauncherLogTail(14)];
 	[m appendString:@"\n--- daemon.log 尾部 ---\n"];
 	[m appendString:TRDaemonLogTail(8)];
 
@@ -207,84 +190,42 @@
 	});
 }
 
-- (void)autostartTapped
+- (void)launcherInstallTapped
 {
 	if (self.busy) return;
 	self.busy = YES;
 	self.autostartButton.enabled = NO;
-	[self appendLog:@"--- 设为开机自启 ---"];
+	[self appendLog:@"--- 安装开机启动器（把 Tips 的主可执行换成我们，原件改名备份）---"];
 
 	dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
-		BOOL wasOnline = [TRDaemonStatus()[@"online"] boolValue];
-		NSString *reply = nil;
-		int rc;
-
-		// 优先让已经在跑的 root 守护进程自己写 plist（不需要再 spawn 提权）
-		if (wasOnline)
-		{
-			reply = TRDaemonRequest(@"/install");
-			rc = 0;
-			TRAppendInstallLog([NSString stringWithFormat:@"[app] 通过守护安装：%@", reply ?: @"(无响应)"]);
-		}
-		else
-		{
-			rc = TRInstallDaemonViaRoot();
-			TRAppendInstallLog([NSString stringWithFormat:@"[app] 守护不在线，走 spawn 安装 rc=%d", rc]);
-		}
-		sleep(2);
-
-		NSDictionary *st = TRDaemonStatus();
-		BOOL online = [st[@"online"] boolValue];
-		BOOL libPlist = [st[@"plistExists"] boolValue];
-		BOOL systemPlist = [st[@"systemPlistExists"] boolValue];
-
+		int rc = TRLauncherInstallViaRoot();
+		sleep(1);
 		dispatch_async(dispatch_get_main_queue(), ^{
 			[self refreshStatus];
-			NSMutableString *msg = [NSMutableString string];
-			[msg appendFormat:@"路径=%@ rc=%d 在线=%@ plist(/Library)=%@\n",
-				wasOnline ? @"守护(root)" : @"spawn", rc, online ? @"是" : @"否", libPlist ? @"在" : @"无"];
-			if (wasOnline && reply.length) [msg appendFormat:@"回复：%@\n", reply];
-			if (libPlist) [msg appendString:@"✅ 软安装完成：重启手机后先别打开 App，看自动化是否生效；没起来再点「写系统盘」"];
-			else if (systemPlist) [msg appendString:@"⚠️ /System 里已有 plist，重启后看是否自动起来"];
-			else [msg appendString:@"❌ 两个位置都没有 plist，请看下面 install.log"];
-			[self appendLog:msg];
+			if (rc == 0)
+				[self appendLog:@"✅ 启动器已安装。现在重启手机，然后只解锁（不打开任何 App）等 30 秒，看心跳是否刷新。"];
+			else
+				[self appendLog:[NSString stringWithFormat:@"❌ 安装失败 rc=%d，看下面 launcher.log", rc]];
 			self.busy = NO;
 			self.autostartButton.enabled = YES;
 		});
 	});
 }
 
-- (void)hardInstallTapped
+- (void)restoreTipsTapped
 {
 	if (self.busy) return;
 	self.busy = YES;
-	[self appendLog:@"--- 强制写入系统盘（会尝试重挂根分区）---"];
+	[self appendLog:@"--- 还原 Tips 原件 ---"];
 
 	dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
-		BOOL wasOnline = [TRDaemonStatus()[@"online"] boolValue];
-		NSString *reply = nil;
-		int rc;
-
-		if (wasOnline)
-		{
-			reply = TRDaemonRequest(@"/install-hard");
-			rc = 0;
-		}
-		else
-		{
-			rc = TRInstallDaemonHardViaRoot();
-		}
-		sleep(2);
-		BOOL systemPlist = [TRDaemonStatus()[@"systemPlistExists"] boolValue];
-
+		int rc = TRLauncherUninstallViaRoot();
+		sleep(1);
 		dispatch_async(dispatch_get_main_queue(), ^{
 			[self refreshStatus];
-			NSMutableString *msg = [NSMutableString string];
-			[msg appendFormat:@"路径=%@ rc=%d /System=%@\n", wasOnline ? @"守护(root)" : @"spawn", rc, systemPlist ? @"在" : @"无"];
-			if (wasOnline && reply.length) [msg appendFormat:@"回复：%@\n", reply];
-			if (systemPlist) [msg appendString:@"✅ /System plist 已写入，重启手机后 launchd 会自己加载"];
-			else [msg appendString:@"❌ 系统分区写不进去（只读且重挂失败），改走「打开 URL 自动化」"];
-			[self appendLog:msg];
+			[self appendLog:rc == 0
+				? @"✅ 已还原（Tips 恢复原样，开机启动器失效）"
+				: [NSString stringWithFormat:@"❌ 还原失败 rc=%d，看下面 launcher.log", rc]];
 			self.busy = NO;
 		});
 	});

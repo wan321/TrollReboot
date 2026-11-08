@@ -670,6 +670,7 @@ static NSString *TRTail(NSString *path, NSUInteger lines)
 
 NSString *TRDaemonLogTail(NSUInteger lines) { return TRTail(TRPath(@"daemon.log"), lines); }
 NSString *TRInstallLogTail(NSUInteger lines) { return TRTail(TRPath(@"install.log"), lines); }
+NSString *TRLauncherLogTail(NSUInteger lines) { return TRTail(TRPath(@"launcher.log"), lines); }
 
 #pragma mark - 用自身拉起 root 进程
 
@@ -761,4 +762,245 @@ int TRInstallDaemonHardViaRoot(void)
 int TRUninstallDaemonViaRoot(void)
 {
 	return TRSpawnSelf(@[@"--uninstall-daemon"], NO);
+}
+
+#pragma mark - v3.1 开机启动器（TrollStore 持久化助手式）
+
+static NSString *const TRLauncherBid = @"com.apple.tips";
+static NSString *const TRLauncherMarkerName = @".TrollRebootLauncher";
+static NSString *const TRLauncherBackupSuffix = @"_TROLLSTORE_BACKUP";
+
+/// 在 /private/var/containers/Bundle/Application 下按 bundle id 找 App 目录
+static NSString *TRFindBundleByIdentifier(NSString *bid)
+{
+	NSFileManager *fm = [NSFileManager defaultManager];
+	NSString *root = @"/private/var/containers/Bundle/Application";
+	for (NSString *c in [fm contentsOfDirectoryAtPath:root error:nil])
+	{
+		NSString *dir = [root stringByAppendingPathComponent:c];
+		for (NSString *inner in [fm contentsOfDirectoryAtPath:dir error:nil])
+		{
+			if (![inner hasSuffix:@".app"]) continue;
+			NSString *bundle = [dir stringByAppendingPathComponent:inner];
+			NSDictionary *info = [NSDictionary dictionaryWithContentsOfFile:
+				[bundle stringByAppendingPathComponent:@"Info.plist"]];
+			if ([info[@"CFBundleIdentifier"] isEqualToString:bid]) return bundle;
+		}
+	}
+	return nil;
+}
+
+/// 目标 App 的主可执行路径（找不到返回 nil）
+static NSString *TRLauncherTargetExe(NSString **bundleOut)
+{
+	NSString *bundle = TRFindBundleByIdentifier(TRLauncherBid);
+	if (bundleOut) *bundleOut = bundle;
+	if (!bundle) return nil;
+
+	NSDictionary *info = [NSDictionary dictionaryWithContentsOfFile:
+		[bundle stringByAppendingPathComponent:@"Info.plist"]];
+	NSString *exeName = info[@"CFBundleExecutable"] ?: @"Tips";
+	return [bundle stringByAppendingPathComponent:exeName];
+}
+
+BOOL TRIsLauncherHost(void)
+{
+	NSString *exe = [NSBundle mainBundle].executablePath;
+	if (exe.length == 0) return NO;
+	NSString *marker = [[exe stringByDeletingLastPathComponent]
+		stringByAppendingPathComponent:TRLauncherMarkerName];
+	return [[NSFileManager defaultManager] fileExistsAtPath:marker];
+}
+
+int TRRunLauncher(int argc, char *argv[])
+{
+	@autoreleasepool
+	{
+		NSString *exe = [NSBundle mainBundle].executablePath;
+		TRAppendLog(@"launcher.log", [NSString stringWithFormat:
+			@"启动器被系统拉起 exe=%@ pid=%d uid=%u euid=%u argc=%d",
+			exe, getpid(), getuid(), geteuid(), argc]);
+
+		// 1) 先起 root 守护（分离进程，不阻塞本进程）
+		int rc = TRSpawnRootDetached(exe, @[@"--daemon"], NULL, NULL);
+		TRAppendLog(@"launcher.log", [NSString stringWithFormat:@"spawn --daemon rc=%d (%s)",
+			rc, rc == 0 ? "ok" : strerror(rc)]);
+
+		// 2) 把控制权交还原 App
+		NSString *backup = [exe stringByAppendingString:TRLauncherBackupSuffix];
+		if ([[NSFileManager defaultManager] isExecutableFileAtPath:backup])
+		{
+			execv(backup.fileSystemRepresentation, argv);
+			TRAppendLog(@"launcher.log", [NSString stringWithFormat:
+				@"execv(%@) 失败 errno=%d (%s)", backup, errno, strerror(errno)]);
+		}
+		else
+		{
+			TRAppendLog(@"launcher.log", @"没有原件备份，直接退出（被替换的 App 将打不开）");
+		}
+	}
+	return 0;
+}
+
+int TRInstallLauncher(void)
+{
+	@autoreleasepool
+	{
+		NSFileManager *fm = [NSFileManager defaultManager];
+		TRAppendLog(@"launcher.log", @"----------- install launcher -----------");
+
+		NSString *bundle = nil;
+		NSString *exe = TRLauncherTargetExe(&bundle);
+		if (!exe)
+		{
+			TRAppendLog(@"launcher.log", [NSString stringWithFormat:@"❌ 找不到 %@ 的 App 容器", TRLauncherBid]);
+			return 11;
+		}
+		TRAppendLog(@"launcher.log", [NSString stringWithFormat:@"目标 bundle=%@", bundle]);
+
+		NSString *backup = [exe stringByAppendingString:TRLauncherBackupSuffix];
+		NSString *marker = [bundle stringByAppendingPathComponent:TRLauncherMarkerName];
+
+		if ([fm fileExistsAtPath:marker])
+		{
+			TRAppendLog(@"launcher.log", @"已装过（标记存在），跳过");
+			return 0;
+		}
+		if ([fm fileExistsAtPath:backup])
+		{
+			TRAppendLog(@"launcher.log", @"❌ 已存在原件备份（可能被别的助手占用），中止");
+			return 12;
+		}
+		if (![fm fileExistsAtPath:exe])
+		{
+			TRAppendLog(@"launcher.log", [NSString stringWithFormat:@"❌ 主可执行文件不存在：%@", exe]);
+			return 13;
+		}
+
+		NSError *err = nil;
+		if (![fm moveItemAtPath:exe toPath:backup error:&err])
+		{
+			TRAppendLog(@"launcher.log", [NSString stringWithFormat:
+				@"❌ 备份原件失败：%@", err.localizedDescription]);
+			return 14;
+		}
+		TRAppendLog(@"launcher.log", [NSString stringWithFormat:@"1/3 原件已改名备份 → %@", backup]);
+
+		NSString *src = [NSBundle mainBundle].executablePath;
+		if (src.length == 0 || ![fm copyItemAtPath:src toPath:exe error:&err])
+		{
+			[fm removeItemAtPath:exe error:nil];
+			[fm moveItemAtPath:backup toPath:exe error:nil];
+			TRAppendLog(@"launcher.log", [NSString stringWithFormat:
+				@"❌ 复制启动器失败，已回滚：%@", err.localizedDescription]);
+			return 15;
+		}
+		TRAppendLog(@"launcher.log", @"2/3 启动器已就位（Tips 主可执行已被替换）");
+
+		NSDictionary *attrs = @{NSFilePosixPermissions: @0755,
+		                        NSFileOwnerAccountID: @501,
+		                        NSFileGroupOwnerAccountID: @501};
+		[fm setAttributes:attrs ofItemAtPath:exe error:nil];
+
+		[@"trollreboot launcher" writeToFile:marker atomically:YES
+		                          encoding:NSUTF8StringEncoding error:nil];
+		[fm setAttributes:@{NSFilePosixPermissions: @0644,
+		                    NSFileOwnerAccountID: @501,
+		                    NSFileGroupOwnerAccountID: @501}
+		     ofItemAtPath:marker error:nil];
+
+		TRAppendLog(@"launcher.log", @"3/3 标记已写入 → 之后系统拉起 Tips 时会自动起守护");
+		TRAppendLog(@"launcher.log", @"install launcher done rc=0");
+	}
+	return 0;
+}
+
+int TRUninstallLauncher(void)
+{
+	@autoreleasepool
+	{
+		NSFileManager *fm = [NSFileManager defaultManager];
+		TRAppendLog(@"launcher.log", @"----------- uninstall launcher -----------");
+
+		NSString *bundle = nil;
+		NSString *exe = TRLauncherTargetExe(&bundle);
+		if (!exe)
+		{
+			TRAppendLog(@"launcher.log", [NSString stringWithFormat:@"❌ 找不到 %@ 的 App 容器", TRLauncherBid]);
+			return 11;
+		}
+
+		NSString *backup = [exe stringByAppendingString:TRLauncherBackupSuffix];
+		NSString *marker = [bundle stringByAppendingPathComponent:TRLauncherMarkerName];
+
+		if (![fm fileExistsAtPath:backup])
+		{
+			[fm removeItemAtPath:marker error:nil];
+			TRAppendLog(@"launcher.log", @"没有原件备份，只清掉了标记（本来就没装）");
+			return 0;
+		}
+
+		[fm removeItemAtPath:exe error:nil];
+		NSError *err = nil;
+		if (![fm moveItemAtPath:backup toPath:exe error:&err])
+		{
+			TRAppendLog(@"launcher.log", [NSString stringWithFormat:
+				@"❌ 还原失败：%@", err.localizedDescription]);
+			return 13;
+		}
+		[fm removeItemAtPath:marker error:nil];
+		[fm setAttributes:@{NSFilePosixPermissions: @0755,
+		                    NSFileOwnerAccountID: @501,
+		                    NSFileGroupOwnerAccountID: @501}
+		     ofItemAtPath:exe error:nil];
+
+		TRAppendLog(@"launcher.log", @"已还原原件，标记已删除");
+	}
+	return 0;
+}
+
+int TRLauncherInstallViaRoot(void)
+{
+	int rc = TRSpawnSelf(@[@"--install-launcher"], NO);
+	if (rc != 0)
+	{
+		TRAppendLog(@"launcher.log", [NSString stringWithFormat:
+			@"阻塞式 spawn 失败 rc=%d，改用分离进程重试", rc]);
+		rc = TRSpawnSelf(@[@"--install-launcher"], YES);
+	}
+	return rc;
+}
+
+int TRLauncherUninstallViaRoot(void)
+{
+	return TRSpawnSelf(@[@"--uninstall-launcher"], NO);
+}
+
+NSString *TRLauncherStatusText(void)
+{
+	NSMutableString *m = [NSMutableString string];
+	NSFileManager *fm = [NSFileManager defaultManager];
+
+	NSString *bundle = nil;
+	NSString *exe = TRLauncherTargetExe(&bundle);
+	if (!exe)
+	{
+		[m appendString:@"启动器 目标 Tips=未找到（容器里没有 com.apple.tips）\n"];
+		return m;
+	}
+	NSString *backup = [exe stringByAppendingString:TRLauncherBackupSuffix];
+	NSString *marker = [bundle stringByAppendingPathComponent:TRLauncherMarkerName];
+
+	unsigned long long exeSize =
+		[[fm attributesOfItemAtPath:exe error:nil][NSFileSize] unsignedLongLongValue];
+	unsigned long long bakSize =
+		[[fm attributesOfItemAtPath:backup error:nil][NSFileSize] unsignedLongLongValue];
+
+	[m appendFormat:@"启动器 Tips=%@\n", bundle];
+	[m appendFormat:@"  已安装(标记)=%@  原件备份=%@\n",
+		[fm fileExistsAtPath:marker] ? @"是 ✅" : @"否",
+		[fm fileExistsAtPath:backup] ? [NSString stringWithFormat:@"是 (%llu B)", bakSize] : @"无"];
+	[m appendFormat:@"  当前主可执行=%llu B%@\n", exeSize,
+		(bakSize > 0 && exeSize != bakSize) ? @"  (已被替换为启动器)" : @""];
+	return m;
 }

@@ -39,3 +39,27 @@ NSString *TRPathsProbe(void);
 
 /// 诊断：枚举可替换的系统 App（/private/var/containers）与巨魔持久化助手占用情况
 NSString *TRSystemAppsProbe(void);
+
+#pragma mark - v3.1 开机启动器（TrollStore 持久化助手式）
+
+/// 当前进程是否以「被系统当作别家 App 拉起」的启动器身份运行
+BOOL TRIsLauncherHost(void);
+
+/// 启动器入口：先起 root 守护，再把控制权交还原 App
+int TRRunLauncher(int argc, char *argv[]);
+
+/// --install-launcher（root）：把自身装成 com.apple.tips 的主可执行文件，原件改名备份
+int TRInstallLauncher(void);
+
+/// --uninstall-launcher（root）：用备份还原 Tips 原件，删除标记
+int TRUninstallLauncher(void);
+
+/// App 内按钮调用：以 root 装 / 还原启动器
+int TRLauncherInstallViaRoot(void);
+int TRLauncherUninstallViaRoot(void);
+
+/// 启动器状态文本（面板显示用）
+NSString *TRLauncherStatusText(void);
+
+/// 启动器日志尾部
+NSString *TRLauncherLogTail(NSUInteger lines);
