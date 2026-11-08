@@ -20,7 +20,7 @@
  * 所有需要 root 的动作都在守护里做，App 只负责显示。
  */
 
-#define TR_BUILD_TAG @"TrollReboot 3.5-mon8"
+#define TR_BUILD_TAG @"TrollReboot 3.5-mon9"
 
 static NSString *TRDeviceName(void)
 {
@@ -318,18 +318,9 @@ static double TRMemoryUsageMB(void)
 /// 向守护要一份 JSON 快照；守护是旧版（unknown path）时重启一次再试
 - (NSDictionary *)fetchSnapshot:(NSString **)outNote
 {
-	NSString *why = nil;
-
-	// 第一优先：自己进程内直接读（电池助手同款权限时是可行的），避免守护进程被内核杀
-	if (TRHasIOKitEntitlement())
-	{
-		NSDictionary *direct = TRBatteryRead();
-		if (direct != nil && [direct[@"ok"] boolValue])
-			return direct;
-		why = [NSString stringWithFormat:@"App 内读失败：%@", direct[@"error"] ?: @"(nil)"];
-	}
-	else
-		why = @"App 缺 iokit-user-client-class 权限，只能靠守护";
+	// mon9：私有 IOKit 在这台机器上会直接杀掉进程，不再在 App 内调用。
+	// 电池数据一律由 root 守护提供（守护内部用公开 API + fork 隔离的私有 IOKit，崩了也不影响 App）。
+	NSString *why = @"";
 
 	NSString *raw = [self rawRequest:@"/batteryjson"];
 	if ([raw isEqualToString:@"unknown path"])
@@ -341,15 +332,14 @@ static double TRMemoryUsageMB(void)
 	if (raw.length == 0 || [raw isEqualToString:@"unknown path"])
 	{
 		if (outNote)
-			*outNote = raw.length == 0 ? [NSString stringWithFormat:@"%@；守护也没响应", why]
-			                           : [NSString stringWithFormat:@"%@；守护是老版本", why];
+			*outNote = raw.length == 0 ? @"守护没响应（连接失败或无内容）" : @"守护是老版本（unknown path）";
 		return nil;
 	}
 	NSData *data = [raw dataUsingEncoding:NSUTF8StringEncoding];
 	if (data.length == 0)
 	{
 		if (outNote)
-			*outNote = [NSString stringWithFormat:@"%@；守护响应为空", why];
+			*outNote = @"守护响应为空";
 		return nil;
 	}
 	id obj = [NSJSONSerialization JSONObjectWithData:data options:0 error:NULL];
@@ -357,14 +347,14 @@ static double TRMemoryUsageMB(void)
 	{
 		NSString *snippet = raw.length > 60 ? [raw substringToIndex:60] : raw;
 		if (outNote)
-			*outNote = [NSString stringWithFormat:@"%@；守护返回非 JSON：%@", why, snippet];
+			*outNote = [NSString stringWithFormat:@"守护返回非 JSON：%@", snippet];
 		return nil;
 	}
 	NSDictionary *dict = (NSDictionary *)obj;
 	if (![dict[@"ok"] boolValue])
 	{
 		if (outNote)
-			*outNote = [NSString stringWithFormat:@"%@；守护读不到：%@", why, dict[@"error"] ?: @"?"];
+			*outNote = [NSString stringWithFormat:@"守护读不到：%@", dict[@"error"] ?: @"?"];
 		return nil;
 	}
 	return dict;
