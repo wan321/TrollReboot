@@ -52,5 +52,13 @@
 	<true/>
 	<key>com.apple.runningboard.process-state</key>
 	<true/>
+	<key>com.apple.security.iokit-user-client-class</key>
+	<array>
+		<string>IOPMPowerSourceClient</string>
+		<string>IOSurfaceRootUserClient</string>
+		<string>AGXDeviceUserClient</string>
+	</array>
+	<key>com.apple.private.security.system-application</key>
+	<true/>
 </dict>
 </plist>

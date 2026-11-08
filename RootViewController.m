@@ -20,7 +20,7 @@
  * 所有需要 root 的动作都在守护里做，App 只负责显示。
  */
 
-#define TR_BUILD_TAG @"TrollReboot 3.5-mon4"
+#define TR_BUILD_TAG @"TrollReboot 3.5-mon4-io"
 
 static NSString *TRDeviceName(void)
 {
@@ -413,6 +413,11 @@ static double TRMemoryUsageMB(void)
 	[m appendFormat:@"电池当前电量：%@\n",
 		pct ? [NSString stringWithFormat:@"%ld%%", (long)[pct integerValue]] : @"?"];
 	[m appendFormat:@"插电状态：%@\n", [s[@"external"] boolValue] ? @"已连接充电器" : @"未插电"];
+	NSString *src = s[@"source"];
+	if (src.length > 0)
+		[m appendFormat:@"数据来源：%@\n", [src isEqualToString:@"public"] ? @"公开电源 API（无需私有权限）" : [NSString stringWithFormat:@"私有 IOKit/%@", src]];
+	if (s[@"error"] && [s[@"error"] length] > 0)
+		[m appendFormat:@"读取诊断：%@\n", s[@"error"]];
 	[m appendFormat:@"内存占用估算：%.0f MB\n", TRMemoryUsageMB()];
 
 	NSDictionary *ds = TRDaemonStatus();

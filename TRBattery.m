@@ -92,6 +92,102 @@ static BOOL TRLoadIOKit(void)
 	return YES;
 }
 
+// ============ 直连 IOKit（与「电池助手 1.0.7」同一条路：真符号，不走 dlopen） ============
+// 电池助手静态链接 /System/Library/Frameworks/IOKit.framework/Versions/A/IOKit，
+// 服务名用 IOPMPowerSource。我们同样直连，避免 dlsym 拿到空指针。
+typedef unsigned int TRIOService;
+
+extern kern_return_t IOMasterPort(mach_port_t bootstrapPort, mach_port_t *masterPort);
+extern CFMutableDictionaryRef IOServiceMatching(const char *name);
+extern TRIOService IOServiceGetMatchingService(mach_port_t masterPort, CFDictionaryRef matching);
+extern kern_return_t IORegistryEntryCreateCFProperties(TRIOService entry, CFMutableDictionaryRef *properties,
+                                                       CFAllocatorRef allocator, unsigned int options);
+extern kern_return_t IOObjectRelease(TRIOService object);
+
+extern CFTypeRef IOPSCopyPowerSourcesInfo(void);
+extern CFArrayRef IOPSCopyPowerSourcesList(CFTypeRef blob);
+extern CFDictionaryRef IOPSGetPowerSourceDescription(CFTypeRef blob, CFTypeRef ps);
+
+static const char *TRServiceNames[] = { "IOPMPowerSource", "AppleSmartBattery", "AppleARMPMUCharger" };
+
+static NSMutableDictionary *TRReadViaLinked(NSString **errOut)
+{
+	NSMutableDictionary *merged = [NSMutableDictionary dictionary];
+	NSMutableString *errs = [NSMutableString string];
+
+	mach_port_t mp = MACH_PORT_NULL;
+	kern_return_t kr = IOMasterPort(MACH_PORT_NULL, &mp);
+	if (kr != KERN_SUCCESS)
+	{
+		[errs appendFormat:@"IOMasterPort kr=%d ", (int)kr];
+		mp = MACH_PORT_NULL;
+	}
+
+	for (size_t i = 0; i < sizeof(TRServiceNames) / sizeof(TRServiceNames[0]); i++)
+	{
+		CFMutableDictionaryRef matching = IOServiceMatching(TRServiceNames[i]);
+		if (matching == NULL) { [errs appendFormat:@"%s:matching=NULL ", TRServiceNames[i]]; continue; }
+		TRIOService svc = IOServiceGetMatchingService(mp, matching);
+		CFRelease(matching);
+		if (svc == 0) { [errs appendFormat:@"%s:service=0 ", TRServiceNames[i]]; continue; }
+		CFMutableDictionaryRef props = NULL;
+		kr = IORegistryEntryCreateCFProperties(svc, &props, kCFAllocatorDefault, 0);
+		IOObjectRelease(svc);
+		if (kr != KERN_SUCCESS || props == NULL) { [errs appendFormat:@"%s:props kr=%d ", TRServiceNames[i], (int)kr]; continue; }
+		NSDictionary *d = CFBridgingRelease(props);
+		if ([d isKindOfClass:[NSDictionary class]]) merged[@(TRServiceNames[i])] = d;
+		else [errs appendFormat:@"%s:props not dict ", TRServiceNames[i]];
+	}
+
+	if (merged.count == 0)
+	{
+		if (errOut) *errOut = errs.length ? errs : @"直连 IOKit 读不到";
+		return nil;
+	}
+	return merged;
+}
+
+static NSDictionary *TRPublicPowerRead(void)
+{
+	NSMutableDictionary *out = [NSMutableDictionary dictionary];
+	CFTypeRef blob = IOPSCopyPowerSourcesInfo();
+	if (blob == NULL) { out[@"error"] = @"IOPSCopyPowerSourcesInfo=NULL"; return out; }
+	CFArrayRef list = IOPSCopyPowerSourcesList(blob);
+	if (list == NULL || CFArrayGetCount(list) == 0)
+	{
+		out[@"error"] = @"power source list empty";
+		if (list) CFRelease(list);
+		CFRelease(blob);
+		return out;
+	}
+	for (CFIndex i = 0; i < CFArrayGetCount(list); i++)
+	{
+		CFTypeRef ps = CFArrayGetValueAtIndex(list, i);
+		CFDictionaryRef desc = IOPSGetPowerSourceDescription(blob, ps);
+		if (desc == NULL) continue;
+		NSDictionary *d = (__bridge NSDictionary *)desc;
+		id transport = d[@"Transport Type"];
+		if (transport && [transport isEqual:@"InternalBattery"])
+		{
+			out[@"ok"] = @YES;
+			out[@"source"] = @"public";
+			if (d[@"Current Capacity"]) out[@"percent"] = d[@"Current Capacity"];
+			if (d[@"Max Capacity"]) out[@"maxCapacity"] = d[@"Max Capacity"];
+			if (d[@"Is Charging"]) out[@"charging"] = @([d[@"Is Charging"] boolValue]);
+			if (d[@"Is Charged"]) out[@"fullyCharged"] = @([d[@"Is Charged"] boolValue]);
+			NSString *state = d[@"Power Source State"];
+			if (state) out[@"external"] = @([state isEqualToString:@"AC Power"]);
+			if (d[@"Current"]) out[@"currentMA"] = d[@"Current"];
+			if (d[@"Voltage"]) out[@"voltageMV"] = d[@"Voltage"];
+			if (d[@"Temperature"]) out[@"tempRaw"] = d[@"Temperature"];
+			break;
+		}
+	}
+	if (list) CFRelease(list);
+	CFRelease(blob);
+	return out;
+}
+
 static NSNumber *TRNum(id v)
 {
 	return [v isKindOfClass:[NSNumber class]] ? (NSNumber *)v : nil;
@@ -142,68 +238,59 @@ NSDictionary *TRBatteryRead(void)
 	NSMutableDictionary *out = [NSMutableDictionary dictionary];
 	out[@"ok"] = @NO;
 
-	if (!TRLoadIOKit())
-	{
-		out[@"error"] = gIOKitError[0] ? @(gIOKitError) : @"dlopen IOKit failed";
-		return out;
-	}
+	// ① 直连 IOKit（和「电池助手」同一条路）
+	NSString *linkErr = nil;
+	NSMutableDictionary *merged = TRReadViaLinked(&linkErr);
+	int created = (int)merged.count;
+	int tried = created;
+	if (merged == nil) merged = [NSMutableDictionary dictionary];
 
-	// 参照 EEIOKitListener：先 IOMasterPort 拿 master port。
-	// 之前直接给 IOServiceGetMatchingService 传 0，在部分 iOS 上拿不到服务甚至直接把进程带走。
-	mach_port_t masterPort = MACH_PORT_NULL;
-	if (gMasterPort)
+	// ② 直连拿不到 → 退回 dlopen/dlsym（老路，保留兼容）
+	if (created == 0 && TRLoadIOKit())
 	{
-		kern_return_t mkr = gMasterPort(MACH_PORT_NULL, &masterPort);
-		if (mkr != KERN_SUCCESS)
+		mach_port_t masterPort = MACH_PORT_NULL;
+		if (gMasterPort)
 		{
-			snprintf(gIOKitError, sizeof(gIOKitError), "IOMasterPort kr=%d", (int)mkr);
-			masterPort = MACH_PORT_NULL;
+			kern_return_t mkr = gMasterPort(MACH_PORT_NULL, &masterPort);
+			if (mkr != KERN_SUCCESS) masterPort = MACH_PORT_NULL;
 		}
-	}
-
-	// AppleSmartBattery：容量 / 电流 / 电压 / 温度
-	// AppleARMPMUCharger：充电器侧数据（EEIOKitListener 用的就是它）
-	const char *serviceNames[] = { "AppleSmartBattery", "AppleARMPMUCharger" };
-	NSMutableDictionary *merged = [NSMutableDictionary dictionary];
-	int tried = 0;
-	int created = 0;
-
-	for (size_t i = 0; i < sizeof(serviceNames) / sizeof(serviceNames[0]); i++)
-	{
-		CFMutableDictionaryRef matching = gServiceMatching(serviceNames[i]);
-		if (matching == NULL)
-			continue;
-
-		io_service_t service = gGetMatchingService(masterPort, matching);
-		CFRelease(matching);
-		if (service == 0)
-			continue;
-
-		CFMutableDictionaryRef props = NULL;
-		kern_return_t kr = gCreateCFProperties(service, &props, kCFAllocatorDefault, 0);
-		gObjectRelease(service);
-		tried++;
-		if (kr != KERN_SUCCESS || props == NULL)
-			continue;
-
-		NSDictionary *d = CFBridgingRelease(props);
-		if ([d isKindOfClass:[NSDictionary class]])
+		for (size_t i = 0; i < sizeof(TRServiceNames) / sizeof(TRServiceNames[0]); i++)
 		{
-			merged[@(serviceNames[i])] = d;
-			created++;
+			CFMutableDictionaryRef matching = gServiceMatching(TRServiceNames[i]);
+			if (matching == NULL) continue;
+			io_service_t service = gGetMatchingService(masterPort, matching);
+			CFRelease(matching);
+			if (service == 0) continue;
+			CFMutableDictionaryRef props = NULL;
+			kern_return_t kr = gCreateCFProperties(service, &props, kCFAllocatorDefault, 0);
+			gObjectRelease(service);
+			tried++;
+			if (kr != KERN_SUCCESS || props == NULL) continue;
+			NSDictionary *d = CFBridgingRelease(props);
+			if ([d isKindOfClass:[NSDictionary class]]) { merged[@(TRServiceNames[i])] = d; created++; }
 		}
 	}
 
 	if (created == 0)
 	{
-		out[@"error"] = [NSString stringWithFormat:@"两个服务都读不到（tried=%d master_port=%u）%@",
-		                                           tried, (unsigned)masterPort,
-		                                           gIOKitError[0] ? @(gIOKitError) : @""];
+		NSDictionary *pub = TRPublicPowerRead();
+		out[@"public"] = pub;
+		out[@"error"] = [NSString stringWithFormat:@"私有读不到（link: %@ | dlopen: %@）公开: %@",
+		                                           linkErr ?: @"-",
+		                                           gIOKitError[0] ? @(gIOKitError) : @"-",
+		                                           pub[@"error"] ?: @"ok"];
+		if ([pub[@"ok"] boolValue])
+		{
+			out[@"ok"] = @YES;
+			out[@"source"] = pub[@"source"] ?: @"public";
+			for (NSString *k in @[@"percent", @"maxCapacity", @"charging", @"fullyCharged", @"external", @"currentMA", @"voltageMV", @"tempRaw"])
+				if (pub[k]) out[k] = pub[k];
+		}
 		return out;
 	}
 
-	NSDictionary *p = merged[@"AppleSmartBattery"] ?: merged[@"AppleARMPMUCharger"];
-	NSDictionary *alt = merged[@"AppleARMPMUCharger"] ?: merged[@"AppleSmartBattery"];
+	NSDictionary *p = merged[@"IOPMPowerSource"] ?: merged[@"AppleSmartBattery"] ?: merged[@"AppleARMPMUCharger"];
+	NSDictionary *alt = merged[@"AppleARMPMUCharger"] ?: merged[@"AppleSmartBattery"] ?: merged[@"IOPMPowerSource"];
 
 	out[@"ok"] = @YES;
 	out[@"properties"] = p;
@@ -279,6 +366,15 @@ NSDictionary *TRBatteryRead(void)
 	out[@"external"] = @([p[@"ExternalConnected"] boolValue]);
 	out[@"charging"] = @([p[@"IsCharging"] boolValue]);
 	out[@"fullyCharged"] = @([p[@"FullyCharged"] boolValue]);
+	// 私有服务里没有电流时，用公开 API 补一次（部分机型 IOPMPowerSource 不带 Current）
+	if (out[@"currentMA"] == nil || out[@"percent"] == nil)
+	{
+		NSDictionary *pub = TRPublicPowerRead();
+		out[@"public"] = pub;
+		if (out[@"currentMA"] == nil && pub[@"currentMA"]) out[@"currentMA"] = pub[@"currentMA"];
+		if (out[@"percent"] == nil && pub[@"percent"]) out[@"percent"] = pub[@"percent"];
+		if (out[@"external"] == nil && pub[@"external"]) out[@"external"] = pub[@"external"];
+	}
 
 	return out;
 }
