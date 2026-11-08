@@ -1,0 +1,9 @@
+Package: com.wan.trollreboot
+Name: TrollReboot
+Version: 1.0
+Architecture: iphoneos-arm
+Description: TrollStore-native reboot triggered through the official trollstorehelper
+Maintainer: wan
+Author: wan
+Section: Utilities
+Depends: firmware (>= 14.0)

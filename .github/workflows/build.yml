@@ -1,0 +1,107 @@
+name: Build TrollReboot TIPA
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+      - master
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build TrollReboot TIPA
+    runs-on: macos-latest
+
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: brew install ldid xz
+
+      - name: Install Theos
+        run: |
+          set -euo pipefail
+          git clone --recursive https://github.com/theos/theos.git "$GITHUB_WORKSPACE/theos"
+          echo "THEOS=$GITHUB_WORKSPACE/theos" >> "$GITHUB_ENV"
+          echo "$GITHUB_WORKSPACE/theos/bin" >> "$GITHUB_PATH"
+
+      - name: Check project
+        run: |
+          set -euo pipefail
+          test -f Makefile
+          test -f control
+          test -f entitlements.plist
+          test -f Resources/Info.plist
+          plutil -lint Resources/Info.plist
+          plutil -lint entitlements.plist
+          echo "--- files ---"
+          find . -maxdepth 2 -type f -not -path './.git/*' | sort
+
+      - name: Build package
+        run: |
+          set -euo pipefail
+          make clean || true
+          make package FINALPACKAGE=1 PACKAGE_FORMAT=ipa
+          ls -la packages || true
+
+      - name: Verify package
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          PACKAGE=$(ls packages/*.tipa packages/*.ipa 2>/dev/null | head -n 1)
+          if [ -z "${PACKAGE:-}" ]; then
+            echo "ERROR: no package produced"
+            exit 1
+          fi
+          echo "Package: $PACKAGE"
+
+          unzip -t "$PACKAGE"
+          TMP=$(mktemp -d)
+          unzip -q "$PACKAGE" -d "$TMP"
+
+          APP=$(find "$TMP/Payload" -maxdepth 1 -name '*.app' | head -n 1)
+          test -n "$APP"
+          echo "App: $APP"
+          ls -la "$APP"
+
+          BIN="$APP/TrollReboot"
+          test -f "$BIN"
+          file -b "$BIN"
+          lipo -info "$BIN"
+
+          # 主二进制必须是真正的 Mach-O 可执行（不是 .dSYM 的 DWARF）
+          otool -hv "$BIN" | tee /tmp/otool.txt
+          if grep -Eq 'DSYM|OBJECT' /tmp/otool.txt; then
+            echo "ERROR: main binary is not an executable Mach-O"
+            exit 1
+          fi
+
+          BININFO=$(file -b "$BIN")
+          case "$BININFO" in
+            *"Mach-O"*"executable"*) echo "OK: main binary is Mach-O executable" ;;
+            *) echo "ERROR: unexpected binary type: $BININFO"; exit 1 ;;
+          esac
+
+          echo "========== ENTITLEMENTS =========="
+          ldid -e "$BIN" | tee /tmp/ent.plist
+          grep -q 'platform-application' /tmp/ent.plist || { echo "ERROR: missing platform-application"; exit 1; }
+          grep -q 'persona-mgmt' /tmp/ent.plist || { echo "ERROR: missing persona-mgmt"; exit 1; }
+
+          echo "========== URL SCHEMES =========="
+          /usr/libexec/PlistBuddy -c "Print :CFBundleURLTypes:0:CFBundleURLSchemes" "$APP/Info.plist"
+
+          mkdir -p dist
+          cp "$PACKAGE" dist/TrollReboot.tipa
+          ls -la dist
+
+      - name: Upload TIPA
+        uses: actions/upload-artifact@v4
+        with:
+          name: TrollReboot-tipa
+          path: dist/TrollReboot.tipa
+          if-no-files-found: error
