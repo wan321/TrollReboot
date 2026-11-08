@@ -579,12 +579,26 @@ int TRLaunchDaemonDetached(void)
 
 int TRInstallDaemonViaRoot(void)
 {
-	return TRSpawnSelf(@[@"--install-daemon"], NO);
+	int rc = TRSpawnSelf(@[@"--install-daemon"], NO);
+	if (rc != 0)
+	{
+		TRAppendLog(@"install.log", [NSString stringWithFormat:
+			@"阻塞式 spawn 失败 rc=%d，改用分离进程（同「① 启用后台守护」）重试", rc]);
+		rc = TRSpawnSelf(@[@"--install-daemon"], YES);
+	}
+	return rc;
 }
 
 int TRInstallDaemonHardViaRoot(void)
 {
-	return TRSpawnSelf(@[@"--install-daemon-hard"], NO);
+	int rc = TRSpawnSelf(@[@"--install-daemon-hard"], NO);
+	if (rc != 0)
+	{
+		TRAppendLog(@"install.log", [NSString stringWithFormat:
+			@"阻塞式 spawn 失败 rc=%d，改用分离进程重试（硬安装）", rc]);
+		rc = TRSpawnSelf(@[@"--install-daemon-hard"], YES);
+	}
+	return rc;
 }
 
 int TRUninstallDaemonViaRoot(void)

@@ -32,7 +32,7 @@
 	CGFloat pad = 16.0;
 
 	self.titleLabel = [[UILabel alloc] initWithFrame:CGRectMake(pad, 48, w - pad * 2, 36)];
-	self.titleLabel.text = @"TrollReboot 1.5";
+	self.titleLabel.text = @"TrollReboot 1.6";
 	self.titleLabel.font = [UIFont boldSystemFontOfSize:28];
 	[self.view addSubview:self.titleLabel];
 
@@ -40,7 +40,7 @@
 	self.hintLabel.numberOfLines = 0;
 	self.hintLabel.font = [UIFont systemFontOfSize:11];
 	self.hintLabel.textColor = [UIColor secondaryLabelColor];
-	self.hintLabel.text = @"① 现在生效　② 开机自启（先软，只写 /Library；重启后没起来再点「写系统盘」）\n锁屏触发用快捷指令「获取 URL 内容」访问 http://127.0.0.1:8899/reboot";
+	self.hintLabel.text = @"① 现在生效（手动）　② 开机自启（写入后重启，由系统在开机/解锁时拉起，不需要打开 App）\n锁屏触发用快捷指令「获取 URL 内容」访问 http://127.0.0.1:8899/reboot";
 	[self.view addSubview:self.hintLabel];
 
 	self.daemonButton = [self makeButton:@"① 启用后台守护（立即生效）" y:132 color:[UIColor systemBlueColor]];
@@ -100,24 +100,8 @@
 	[super viewDidAppear:animated];
 	[self refreshStatus];
 
-	// 每次打开 App 时，如果守护没在跑就静默拉起一次（不阻塞 UI）
-	if (!self.didAutoStart)
-	{
-		self.didAutoStart = YES;
-		if (![TRDaemonStatus()[@"online"] boolValue])
-		{
-			[self appendLog:@"守护不在线，自动拉起…"];
-			dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
-				int rc = TRLaunchDaemonDetached();
-				sleep(1);
-				dispatch_async(dispatch_get_main_queue(), ^{
-					[self refreshStatus];
-					[self appendLog:[NSString stringWithFormat:@"自动拉起 rc=%d，在线=%@", rc,
-						[TRDaemonStatus()[@"online"] boolValue] ? @"是" : @"否"]];
-				});
-			});
-		}
-	}
+	// 不再在打开 App 时自动拉起守护（用户要求：守护应由开机/解锁触发，而不是靠开 App）
+
 
 	if (self.pendingURL)
 	{
@@ -130,7 +114,7 @@
 - (void)refreshStatus
 {
 	NSMutableString *m = [NSMutableString string];
-	[m appendFormat:@"build = TrollReboot 1.5\n"];
+	[m appendFormat:@"build = TrollReboot 1.6\n"];
 	[m appendFormat:@"app uid=%u euid=%u\n", getuid(), geteuid()];
 
 	NSDictionary *st = TRDaemonStatus();
