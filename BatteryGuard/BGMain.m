@@ -27,7 +27,7 @@
 #import "TRMonitor.h"
 #import "TRRootOps.h"
 
-#define BG_TAG @"BatteryGuard 1.2 app-bridge"
+#define BG_TAG @"BatteryGuard 1.3 rules"
 #define BGDIR @"/var/mobile/Library/Caches/com.wan.batterychargeguard"
 #define BG_TICK_SEC 2.0
 #define BG_LOG_MAX 512 * 1024
@@ -573,6 +573,18 @@ static NSInteger gTickSeq = 0;
 static NSUInteger gRawPos = 0;
 static BOOL gRebooting = NO;
 
+/// 规则说明：全部数值从常量现取，改常量就跟着变，不再写死一句话
+static NSString *BGRuleText(void)
+{
+	return [NSString stringWithFormat:
+	        @"规则: 插电+在充+未满+温度%d-%d℃+|电流|<%dmA 持续%ld分(容忍%ds)\n"
+	        @"安全: 冷却%ld分/开机%d次/小时%d次/天%d次/熔断%d次",
+	        TRMON_TEMP_MIN_C, TRMON_TEMP_MAX_C, TRMON_CURRENT_MA,
+	        (long)TRMonitorStuckMinutes(), TRMON_GRACE_SEC,
+	        (long)(TRMON_COOLDOWN_SEC / 60), TRMON_MAX_PER_BOOT,
+	        TRMON_MAX_PER_HOUR, TRMON_MAX_PER_DAY, TRMON_BREAKER_COUNT];
+}
+
 static void BGTick(void)
 {
 	gTickSeq++;
@@ -653,6 +665,7 @@ static void BGTick(void)
 	[panel addObject:[NSString stringWithFormat:@"条件:%@", cond]];
 	[panel addObject:accum];
 	[panel addObject:[NSString stringWithFormat:@"安全:%@", safety]];
+	[panel addObject:BGRuleText()];
 	if (block)
 		[panel addObject:[NSString stringWithFormat:@"阻断:%@", block]];
 	if (sample[@"error"])
@@ -713,7 +726,7 @@ static void BGInstallPanel(void)
 		return;
 
 	CGFloat width = key.bounds.size.width;
-	CGFloat height = 150;
+	CGFloat height = 172;
 	CGRect frame = CGRectMake(10, key.bounds.size.height - height - 8, width - 20, height);
 
 	UIView *panel = [[UIView alloc] initWithFrame:frame];
@@ -778,7 +791,7 @@ static void BGInstallPanel(void)
 	gHeadLabel.text = [[BG_TAG stringByAppendingString:@" · 2s · 源App"] copy];
 	[panel addSubview:gHeadLabel];
 
-	gBodyLabel = [[UILabel alloc] initWithFrame:CGRectMake(10, 54, frame.size.width - 20, 90)];
+	gBodyLabel = [[UILabel alloc] initWithFrame:CGRectMake(10, 54, frame.size.width - 20, 112)];
 	gBodyLabel.numberOfLines = 0;
 	gBodyLabel.textColor = [UIColor whiteColor];
 	gBodyLabel.font = [UIFont monospacedSystemFontOfSize:8.5 weight:UIFontWeightRegular];
