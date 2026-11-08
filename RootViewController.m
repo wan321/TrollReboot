@@ -20,7 +20,7 @@
  * 所有需要 root 的动作都在守护里做，App 只负责显示。
  */
 
-#define TR_BUILD_TAG @"TrollReboot 3.5-mon6"
+#define TR_BUILD_TAG @"TrollReboot 3.5-mon7"
 
 static NSString *TRDeviceName(void)
 {
@@ -290,7 +290,8 @@ static double TRMemoryUsageMB(void)
 
 	__weak typeof(self) weakSelf = self;
 	dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
-		NSDictionary *snap = [weakSelf fetchSnapshot];
+		NSString *note = nil;
+		NSDictionary *snap = [weakSelf fetchSnapshot:&note];
 		dispatch_async(dispatch_get_main_queue(), ^{
 			RootViewController *s2 = weakSelf;
 			if (s2 == nil)
@@ -298,13 +299,11 @@ static double TRMemoryUsageMB(void)
 			if (snap == nil)
 			{
 				s2.failStreak += 1;
-				if (s2.failStreak == 3)
-					[s2 appendLog:@"⚠️ 连续没拿到电池数据（守护没响应）"];
-				if (s2.failStreak >= 10)
-				{
-					[s2 stopProbe];
-					[s2 appendLog:@"探针暂停：守护一直没响应，重开 App 再试"];
-				}
+				if (s2.failStreak < 20)
+					[s2 appendLog:[NSString stringWithFormat:@"采样失败 %ld/20：%@",
+					          (long)s2.failStreak, note.length > 0 ? note : @"未知原因"]];
+				else if (s2.failStreak == 20)
+					[s2 appendLog:@"⚠️ 连续 20 次没拿到电池数据（守护没响应，继续每秒重试）"];
 				return;
 			}
 			s2.failStreak = 0;
@@ -316,7 +315,8 @@ static double TRMemoryUsageMB(void)
 #pragma mark - 取数据
 
 /// 向守护要一份 JSON 快照；守护是旧版（unknown path）时重启一次再试
-- (NSDictionary *)fetchSnapshot
+- (NSDictionary *)fetchSnapshot:(NSString **)outNote
+- (NSDictionary *)fetchSnapshot:(NSString **)outNote
 {
 	NSString *raw = [self rawRequest:@"/batteryjson"];
 	if ([raw isEqualToString:@"unknown path"])
@@ -326,14 +326,26 @@ static double TRMemoryUsageMB(void)
 		raw = [self rawRequest:@"/batteryjson"];
 	}
 	if (raw.length == 0 || [raw isEqualToString:@"unknown path"])
+	{
+		if (outNote)
+			*outNote = raw.length == 0 ? @"守护没响应（连接失败或无内容）" : @"守护是老版本（unknown path）";
 		return nil;
-
+	}
 	NSData *data = [raw dataUsingEncoding:NSUTF8StringEncoding];
 	if (data.length == 0)
+	{
+		if (outNote)
+			*outNote = @"编码失败";
 		return nil;
-
+	}
 	id obj = [NSJSONSerialization JSONObjectWithData:data options:0 error:NULL];
-	return [obj isKindOfClass:[NSDictionary class]] ? (NSDictionary *)obj : nil;
+	if (![obj isKindOfClass:[NSDictionary class]])
+	{
+		if (outNote)
+			*outNote = @"守护返回的不是 JSON";
+		return nil;
+	}
+	return (NSDictionary *)obj;
 }
 
 - (NSString *)rawRequest:(NSString *)path

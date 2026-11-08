@@ -53,8 +53,9 @@ static BOOL TRLoadIOKit(void)
 	gIOKitError[0] = 0;
 
 	const char *candidates[] = {
-		"/System/Library/PrivateFrameworks/IOKit.framework/IOKit",
+		"/System/Library/Frameworks/IOKit.framework/Versions/A/IOKit",
 		"/System/Library/Frameworks/IOKit.framework/IOKit",
+		"/System/Library/PrivateFrameworks/IOKit.framework/IOKit",
 		"IOKit",
 		"/usr/lib/libIOKit.dylib",
 	};
@@ -163,7 +164,7 @@ NSDictionary *TRBatteryRead(void)
 
 	// AppleSmartBattery：容量 / 电流 / 电压 / 温度
 	// AppleARMPMUCharger：充电器侧数据（EEIOKitListener 用的就是它）
-	const char *serviceNames[] = { "AppleSmartBattery", "AppleARMPMUCharger" };
+	const char *serviceNames[] = { "IOPMPowerSource", "AppleSmartBattery", "AppleARMPMUCharger" };
 	NSMutableDictionary *merged = [NSMutableDictionary dictionary];
 	int tried = 0;
 	int created = 0;
@@ -202,8 +203,8 @@ NSDictionary *TRBatteryRead(void)
 		return out;
 	}
 
-	NSDictionary *p = merged[@"AppleSmartBattery"] ?: merged[@"AppleARMPMUCharger"];
-	NSDictionary *alt = merged[@"AppleARMPMUCharger"] ?: merged[@"AppleSmartBattery"];
+	NSDictionary *p = merged[@"IOPMPowerSource"] ?: merged[@"AppleSmartBattery"] ?: merged[@"AppleARMPMUCharger"];
+	NSDictionary *alt = merged[@"AppleARMPMUCharger"] ?: merged[@"AppleSmartBattery"] ?: merged[@"IOPMPowerSource"];
 
 	out[@"ok"] = @YES;
 	out[@"properties"] = p;
