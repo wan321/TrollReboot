@@ -150,6 +150,55 @@ int TRSpawnRoot(NSString *path, NSArray<NSString *> *args, NSString **stdOut, NS
 	return WEXITSTATUS(status);
 }
 
+int TRSpawnRootDetached(NSString *path, NSArray<NSString *> *args, NSString **stdOut, NSString **stdErr)
+{
+	if (path.length == 0)
+	{
+		if (stdErr) *stdErr = @"empty path";
+		return EINVAL;
+	}
+
+	NSMutableArray *argsM = args ? [args mutableCopy] : [NSMutableArray array];
+	[argsM insertObject:path atIndex:0];
+
+	NSUInteger argCount = argsM.count;
+	char **argsC = (char **)calloc(argCount + 1, sizeof(char *));
+	if (!argsC) return ENOMEM;
+	for (NSUInteger i = 0; i < argCount; i++)
+	{
+		argsC[i] = strdup([argsM[i] UTF8String]);
+	}
+	argsC[argCount] = NULL;
+
+	posix_spawnattr_t attr;
+	posix_spawnattr_init(&attr);
+	posix_spawnattr_set_persona_np(&attr, 99, POSIX_SPAWN_PERSONA_FLAGS_OVERRIDE);
+	posix_spawnattr_set_persona_uid_np(&attr, 0);
+	posix_spawnattr_set_persona_gid_np(&attr, 0);
+	posix_spawnattr_setflags(&attr, POSIX_SPAWN_SETSID);
+
+	posix_spawn_file_actions_t action;
+	posix_spawn_file_actions_init(&action);
+	posix_spawn_file_actions_addopen(&action, STDIN_FILENO, "/dev/null", O_RDONLY, 0);
+	posix_spawn_file_actions_addopen(&action, STDOUT_FILENO, "/dev/null", O_WRONLY, 0);
+	posix_spawn_file_actions_addopen(&action, STDERR_FILENO, "/dev/null", O_WRONLY, 0);
+
+	pid_t pid = 0;
+	int spawnError = posix_spawn(&pid, path.fileSystemRepresentation, &action, &attr, argsC, NULL);
+
+	posix_spawn_file_actions_destroy(&action);
+	posix_spawnattr_destroy(&attr);
+	for (NSUInteger i = 0; i < argCount; i++)
+	{
+		free(argsC[i]);
+	}
+	free(argsC);
+
+	if (stdOut) *stdOut = @"";
+	if (stdErr) *stdErr = spawnError ? [NSString stringWithFormat:@"posix_spawn=%d (%s)", spawnError, strerror(spawnError)] : @"";
+	return spawnError;
+}
+
 NSArray<NSString *> *TRHelperCandidates(void)
 {
 	NSFileManager *fm = [NSFileManager defaultManager];
