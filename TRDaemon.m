@@ -484,23 +484,36 @@ static NSString *TRMonitorJSON(void)
 	         : @"{\"ok\":false}";
 }
 
-/// /monitor/set?minutes=N —— 唯一可写项
+/// /monitor/set?minutes=N —— 唯一可写项。返回 JSON，便于 App 端确认「真的写进去了」
 static NSString *TRMonitorSetMinutes(NSString *query)
 {
-	NSInteger minutes = TRMonitorStuckMinutes();
+	NSInteger before = TRMonitorStuckMinutesFromFile();
+	NSInteger minutes = before;
 
 	NSRange qm = [query rangeOfString:@"minutes="];
 	if (qm.location != NSNotFound)
 		minutes = [[query substringFromIndex:NSMaxRange(qm)] integerValue];
+	if (minutes < TRMON_MINUTES_MIN)
+		minutes = TRMON_MINUTES_MIN;
+	if (minutes > TRMON_MINUTES_MAX)
+		minutes = TRMON_MINUTES_MAX;
 
 	NSString *detail = nil;
 	BOOL ok = TRMonitorWriteStuckMinutes(minutes, &detail);
-	NSInteger saved = TRMonitorStuckMinutes();
+	NSInteger saved = TRMonitorStuckMinutesFromFile();
 
-	TRAppendLog(@"daemon.log", [NSString stringWithFormat:@"[monitor] 分钟数改为 %ld（ok=%d %@）",
-	                                                     (long)saved, ok, detail ?: @""]);
+	TRAppendLog(@"daemon.log", [NSString stringWithFormat:@"[monitor] 分钟数 %ld → 请求 %ld → 文件读回 %ld（写入 ok=%d %@）文件=%@",
+	                                                      (long)before, (long)minutes, (long)saved, ok, detail ?: @"",
+	                                                      TRMonitorConfigPath()]);
 
-	return [NSString stringWithFormat:@"已保存：连续 %ld 分钟算卡死\n%@", (long)saved, TRMonitorConditionsText()];
+	NSDictionary *j = @{
+		@"ok" : @(ok && saved == minutes),
+		@"requested" : @(minutes),
+		@"minutes" : @(saved),
+		@"file" : TRMonitorConfigPath()
+	};
+	NSData *d = [NSJSONSerialization dataWithJSONObject:j options:0 error:NULL];
+	return d.length ? [[NSString alloc] initWithData:d encoding:NSUTF8StringEncoding] : @"{}";
 }
 
 /// /monitor/reset —— 人工重置熔断与计数（不动分钟数）
@@ -693,7 +706,7 @@ int TRRunDaemon(void)
 		{
 			pthread_detach(mon);
 			TRAppendLog(@"daemon.log", [NSString stringWithFormat:@"[monitor] 线程已启动：连续 %ld 分钟｜%@",
-			                                                      (long)TRMonitorStuckMinutes(),
+			                                                      (long)TRMonitorStuckMinutesFromFile(),
 			                                                      TRMonitorConditionsText()]);
 		}
 

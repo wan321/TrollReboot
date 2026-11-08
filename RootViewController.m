@@ -20,7 +20,7 @@
  * 所有需要 root 的动作都在守护里做，App 只负责显示。
  */
 
-#define TR_BUILD_TAG @"TrollReboot 3.5-mon3"
+#define TR_BUILD_TAG @"TrollReboot 3.5-mon4"
 
 static NSString *TRDeviceName(void)
 {
@@ -527,24 +527,66 @@ static double TRMemoryUsageMB(void)
 	__weak typeof(self) weakSelf = self;
 	dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
 		NSString *path = [NSString stringWithFormat:@"/monitor/set?minutes=%ld", (long)minutes];
-		NSString *r = TRDaemonRequest(path);
+
+		// 一次写入 + 再向守护确认；不认账时重启守护再来一次（老守护没有 /monitor/set 时会返回 unknown path）
+		NSInteger confirmed = -1;
+		BOOL restarted = NO;
+		NSString *lastResp = @"";
+		for (int attempt = 0; attempt < 2; attempt++)
+		{
+			NSString *r = TRDaemonRequest(path);
+			NSDictionary *j = nil;
+			if ([r hasPrefix:@"{"])
+				j = [NSJSONSerialization JSONObjectWithData:[r dataUsingEncoding:NSUTF8StringEncoding] options:0 error:NULL];
+
+			BOOL ok = [j isKindOfClass:[NSDictionary class]] && [j[@"ok"] boolValue];
+			if (ok)
+			{
+				confirmed = [j[@"minutes"] integerValue];
+				break;
+			}
+
+			NSString *tail = [r length] > 60 ? [r substringToIndex:60] : r;
+			lastResp = tail;
+			if (attempt == 0)
+			{
+				TRRestartDaemonDetached();
+				restarted = YES;
+				sleep(3);
+			}
+		}
+
+		if (confirmed < 0)
+		{
+			// 再直接读一次 /monitor 交叉验证
+			NSString *m = TRDaemonRequest(@"/monitor");
+			if ([m hasPrefix:@"{"])
+			{
+				NSDictionary *jm = [NSJSONSerialization JSONObjectWithData:[m dataUsingEncoding:NSUTF8StringEncoding] options:0 error:NULL];
+				if ([jm isKindOfClass:[NSDictionary class]])
+					confirmed = [jm[@"minutes"] integerValue];
+			}
+		}
+
 		dispatch_async(dispatch_get_main_queue(), ^{
 			RootViewController *s = weakSelf;
 			if (s == nil)
 				return;
-			if ([r hasPrefix:@"{"])
+			if (confirmed == minutes)
 			{
-				NSDictionary *j = [NSJSONSerialization JSONObjectWithData:[r dataUsingEncoding:NSUTF8StringEncoding]
-				                                                 options:0
-				                                                   error:NULL];
-				if ([j isKindOfClass:[NSDictionary class]])
-					s.monitorMinutes = [j[@"minutes"] integerValue];
+				s.monitorMinutes = confirmed;
+				TRMonitorSetCachedMinutes(confirmed);
+				[s updateMonitorButton];
+				[s appendLog:[NSString stringWithFormat:@"✔ 已生效：电流持续为零 %ld 分钟才重启（守护已确认）", (long)confirmed]];
 			}
-			if (s.monitorMinutes <= 0)
-				s.monitorMinutes = minutes;
-			TRMonitorSetCachedMinutes(s.monitorMinutes);
-			[s updateMonitorButton];
-			[s appendLog:[NSString stringWithFormat:@"已生效：电流持续为零 %ld 分钟才重启", (long)s.monitorMinutes]];
+			else
+			{
+				s.monitorMinutes = confirmed > 0 ? confirmed : s.monitorMinutes;
+				[s updateMonitorButton];
+				[s appendLog:[NSString stringWithFormat:@"✘ 没能生效：请求 %ld 分钟，守护实际 %ld 分钟%@ 回应=%@",
+				                                    (long)minutes, (long)confirmed,
+				                                    restarted ? @"（已重启守护再试）" : @"", lastResp]];
+			}
 			[s reloadMonitor];
 		});
 	});

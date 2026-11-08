@@ -53,6 +53,9 @@ NSString *TRMonitorSafetyBlock(NSDictionary *state);
 /// 联合条件的一行文本（面板/日志用）
 NSString *TRMonitorConditionsText(void);
 
+/// 直接读配置文件（绕过 gCachedMinutes，守护端写后校验用）
+NSInteger TRMonitorStuckMinutesFromFile(void);
+
 /// App 沙盒内读不到配置文件，用守护告知的值覆盖（仅本进程有效）
 void TRMonitorSetCachedMinutes(NSInteger minutes);
 

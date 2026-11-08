@@ -102,6 +102,19 @@ NSInteger TRMonitorStuckMinutes(void)
 	return m;
 }
 
+NSInteger TRMonitorStuckMinutesFromFile(void)
+{
+	NSDictionary *cfg = TRReadJSON(TRMonitorConfigPath());
+	NSInteger m = TRMON_MINUTES_DEFAULT;
+	if ([cfg[TRMonMinutesKey] isKindOfClass:[NSNumber class]])
+		m = [cfg[TRMonMinutesKey] integerValue];
+	if (m < TRMON_MINUTES_MIN)
+		m = TRMON_MINUTES_MIN;
+	if (m > TRMON_MINUTES_MAX)
+		m = TRMON_MINUTES_MAX;
+	return m;
+}
+
 BOOL TRMonitorWriteStuckMinutes(NSInteger minutes, NSString **detail)
 {
 	if (minutes < TRMON_MINUTES_MIN)
