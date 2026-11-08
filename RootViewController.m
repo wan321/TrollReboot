@@ -316,7 +316,6 @@ static double TRMemoryUsageMB(void)
 
 /// 向守护要一份 JSON 快照；守护是旧版（unknown path）时重启一次再试
 - (NSDictionary *)fetchSnapshot:(NSString **)outNote
-- (NSDictionary *)fetchSnapshot:(NSString **)outNote
 {
 	NSString *raw = [self rawRequest:@"/batteryjson"];
 	if ([raw isEqualToString:@"unknown path"])
