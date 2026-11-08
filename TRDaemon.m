@@ -1160,7 +1160,7 @@ NSString *TRLauncherStatusText(void)
 
 BOOL TRDaemonIsOnline(void)
 {
-	return [TRDaemonStatus()["online"] boolValue];
+	return [TRDaemonStatus()[@"online"] boolValue];
 }
 
 int TREnsureDaemonDetached(void)
