@@ -764,11 +764,18 @@ int TRUninstallDaemonViaRoot(void)
 	return TRSpawnSelf(@[@"--uninstall-daemon"], NO);
 }
 
-#pragma mark - v3.1 开机启动器（TrollStore 持久化助手式）
 
-static NSString *const TRLauncherBid = @"com.apple.tips";
+#pragma mark - v3.2 开机启动器（TrollStore 持久化助手式，宿主优先 Watch）
+
 static NSString *const TRLauncherMarkerName = @".TrollRebootLauncher";
 static NSString *const TRLauncherBackupSuffix = @"_TROLLSTORE_BACKUP";
+static NSString *const TRTrollStoreMarkerName = @".TrollStorePersistenceHelper";
+
+/// 候选宿主，按优先级：Watch(com.apple.Bridge) 为主；Tips 保留用于还原上一版
+static NSArray<NSString *> *TRLauncherHostBids(void)
+{
+	return @[@"com.apple.Bridge", @"com.apple.tips"];
+}
 
 /// 在 /private/var/containers/Bundle/Application 下按 bundle id 找 App 目录
 static NSString *TRFindBundleByIdentifier(NSString *bid)
@@ -790,26 +797,70 @@ static NSString *TRFindBundleByIdentifier(NSString *bid)
 	return nil;
 }
 
-/// 目标 App 的主可执行路径（找不到返回 nil）
-static NSString *TRLauncherTargetExe(NSString **bundleOut)
+static NSString *TRBundleExePath(NSString *bundle)
 {
-	NSString *bundle = TRFindBundleByIdentifier(TRLauncherBid);
-	if (bundleOut) *bundleOut = bundle;
-	if (!bundle) return nil;
-
 	NSDictionary *info = [NSDictionary dictionaryWithContentsOfFile:
 		[bundle stringByAppendingPathComponent:@"Info.plist"]];
-	NSString *exeName = info[@"CFBundleExecutable"] ?: @"Tips";
+	NSString *exeName = info[@"CFBundleExecutable"];
+	if (exeName.length == 0) exeName = [[bundle lastPathComponent] stringByDeletingPathExtension];
 	return [bundle stringByAppendingPathComponent:exeName];
+}
+
+static NSString *TRBundleBid(NSString *bundle)
+{
+	NSDictionary *info = [NSDictionary dictionaryWithContentsOfFile:
+		[bundle stringByAppendingPathComponent:@"Info.plist"]];
+	return info[@"CFBundleIdentifier"] ?: [bundle lastPathComponent];
+}
+
+static BOOL TRBundleHasOurMarker(NSString *bundle)
+{
+	return [[NSFileManager defaultManager] fileExistsAtPath:
+		[bundle stringByAppendingPathComponent:TRLauncherMarkerName]];
+}
+
+static BOOL TRBundleIsTrollStoreHost(NSString *bundle)
+{
+	return [[NSFileManager defaultManager] fileExistsAtPath:
+		[bundle stringByAppendingPathComponent:TRTrollStoreMarkerName]];
+}
+
+/// 选宿主：已装过的优先；否则取第一个存在、且没被 TrollStore 占用的
+static NSString *TRPickLauncherBundle(NSMutableArray<NSString *> *notes)
+{
+	NSFileManager *fm = [NSFileManager defaultManager];
+	NSArray *bids = TRLauncherHostBids();
+
+	for (NSString *bid in bids)
+	{
+		NSString *b = TRFindBundleByIdentifier(bid);
+		if (b && TRBundleHasOurMarker(b)) return b;
+	}
+
+	for (NSString *bid in bids)
+	{
+		NSString *b = TRFindBundleByIdentifier(bid);
+		if (!b)
+		{
+			if (notes) [notes addObject:[NSString stringWithFormat:@"%@ 找不到", bid]];
+			continue;
+		}
+		if ([fm fileExistsAtPath:[b stringByAppendingPathComponent:TRTrollStoreMarkerName]])
+		{
+			if (notes) [notes addObject:[NSString stringWithFormat:@"%@ 已被 TrollStore 占用，跳过", bid]];
+			continue;
+		}
+		if (notes) [notes addObject:[NSString stringWithFormat:@"选中 %@", bid]];
+		return b;
+	}
+	return nil;
 }
 
 BOOL TRIsLauncherHost(void)
 {
 	NSString *exe = [NSBundle mainBundle].executablePath;
 	if (exe.length == 0) return NO;
-	NSString *marker = [[exe stringByDeletingLastPathComponent]
-		stringByAppendingPathComponent:TRLauncherMarkerName];
-	return [[NSFileManager defaultManager] fileExistsAtPath:marker];
+	return TRBundleHasOurMarker([exe stringByDeletingLastPathComponent]);
 }
 
 int TRRunLauncher(int argc, char *argv[])
@@ -842,6 +893,47 @@ int TRRunLauncher(int argc, char *argv[])
 	return 0;
 }
 
+static int TRRestoreLauncherAt(NSString *bundle)
+{
+	NSFileManager *fm = [NSFileManager defaultManager];
+	NSString *bid = TRBundleBid(bundle);
+	NSString *exe = TRBundleExePath(bundle);
+	NSString *backup = [exe stringByAppendingString:TRLauncherBackupSuffix];
+	NSString *marker = [bundle stringByAppendingPathComponent:TRLauncherMarkerName];
+
+	if (!TRBundleHasOurMarker(bundle))
+	{
+		TRAppendLog(@"launcher.log", [NSString stringWithFormat:@"%@ 不是我们的宿主（无标记），跳过", bid]);
+		return 0;
+	}
+	if (TRBundleIsTrollStoreHost(bundle))
+	{
+		TRAppendLog(@"launcher.log", [NSString stringWithFormat:@"%@ 带 TrollStore 标记，拒绝改动", bid]);
+		return 0;
+	}
+	if (![fm fileExistsAtPath:backup])
+	{
+		[fm removeItemAtPath:marker error:nil];
+		TRAppendLog(@"launcher.log", [NSString stringWithFormat:@"%@ 没有原件备份，只清掉标记", bid]);
+		return 0;
+	}
+
+	[fm removeItemAtPath:exe error:nil];
+	NSError *err = nil;
+	if (![fm moveItemAtPath:backup toPath:exe error:&err])
+	{
+		TRAppendLog(@"launcher.log", [NSString stringWithFormat:@"%@ 还原失败：%@", bid, err.localizedDescription]);
+		return 13;
+	}
+	[fm removeItemAtPath:marker error:nil];
+	[fm setAttributes:@{NSFilePosixPermissions: @0755,
+	                    NSFileOwnerAccountID: @501,
+	                    NSFileGroupOwnerAccountID: @501}
+	     ofItemAtPath:exe error:nil];
+	TRAppendLog(@"launcher.log", [NSString stringWithFormat:@"%@ 已还原原件", bid]);
+	return 0;
+}
+
 int TRInstallLauncher(void)
 {
 	@autoreleasepool
@@ -849,22 +941,30 @@ int TRInstallLauncher(void)
 		NSFileManager *fm = [NSFileManager defaultManager];
 		TRAppendLog(@"launcher.log", @"----------- install launcher -----------");
 
-		NSString *bundle = nil;
-		NSString *exe = TRLauncherTargetExe(&bundle);
-		if (!exe)
+		NSMutableArray *notes = [NSMutableArray array];
+		NSString *bundle = TRPickLauncherBundle(notes);
+		for (NSString *n in notes) TRAppendLog(@"launcher.log", n);
+		if (!bundle)
 		{
-			TRAppendLog(@"launcher.log", [NSString stringWithFormat:@"❌ 找不到 %@ 的 App 容器", TRLauncherBid]);
+			TRAppendLog(@"launcher.log", @"❌ 没有可用宿主（候选都找不到或被 TrollStore 占用）");
 			return 11;
 		}
-		TRAppendLog(@"launcher.log", [NSString stringWithFormat:@"目标 bundle=%@", bundle]);
 
+		NSString *bid = TRBundleBid(bundle);
+		NSString *exe = TRBundleExePath(bundle);
 		NSString *backup = [exe stringByAppendingString:TRLauncherBackupSuffix];
 		NSString *marker = [bundle stringByAppendingPathComponent:TRLauncherMarkerName];
+		TRAppendLog(@"launcher.log", [NSString stringWithFormat:@"目标宿主 %@ → %@", bid, bundle]);
 
-		if ([fm fileExistsAtPath:marker])
+		if (TRBundleHasOurMarker(bundle))
 		{
 			TRAppendLog(@"launcher.log", @"已装过（标记存在），跳过");
 			return 0;
+		}
+		if (TRBundleIsTrollStoreHost(bundle))
+		{
+			TRAppendLog(@"launcher.log", @"❌ 该宿主带 TrollStore 标记，拒绝改动");
+			return 16;
 		}
 		if ([fm fileExistsAtPath:backup])
 		{
@@ -895,12 +995,12 @@ int TRInstallLauncher(void)
 				@"❌ 复制启动器失败，已回滚：%@", err.localizedDescription]);
 			return 15;
 		}
-		TRAppendLog(@"launcher.log", @"2/3 启动器已就位（Tips 主可执行已被替换）");
+		TRAppendLog(@"launcher.log", @"2/3 启动器已就位（宿主主可执行已被替换）");
 
-		NSDictionary *attrs = @{NSFilePosixPermissions: @0755,
-		                        NSFileOwnerAccountID: @501,
-		                        NSFileGroupOwnerAccountID: @501};
-		[fm setAttributes:attrs ofItemAtPath:exe error:nil];
+		[fm setAttributes:@{NSFilePosixPermissions: @0755,
+		                    NSFileOwnerAccountID: @501,
+		                    NSFileGroupOwnerAccountID: @501}
+		     ofItemAtPath:exe error:nil];
 
 		[@"trollreboot launcher" writeToFile:marker atomically:YES
 		                          encoding:NSUTF8StringEncoding error:nil];
@@ -909,7 +1009,10 @@ int TRInstallLauncher(void)
 		                    NSFileGroupOwnerAccountID: @501}
 		     ofItemAtPath:marker error:nil];
 
-		TRAppendLog(@"launcher.log", @"3/3 标记已写入 → 之后系统拉起 Tips 时会自动起守护");
+		[[bid dataUsingEncoding:NSUTF8StringEncoding] writeToFile:TRPath(@"launcher.target") atomically:YES];
+
+		TRAppendLog(@"launcher.log", [NSString stringWithFormat:
+			@"3/3 标记已写入（宿主=%@）→ 之后系统拉起该 App 时会自动起守护", bid]);
 		TRAppendLog(@"launcher.log", @"install launcher done rc=0");
 	}
 	return 0;
@@ -919,44 +1022,30 @@ int TRUninstallLauncher(void)
 {
 	@autoreleasepool
 	{
-		NSFileManager *fm = [NSFileManager defaultManager];
 		TRAppendLog(@"launcher.log", @"----------- uninstall launcher -----------");
 
-		NSString *bundle = nil;
-		NSString *exe = TRLauncherTargetExe(&bundle);
-		if (!exe)
+		// 先按记录的宿主还原，再把候选列表全扫一遍（兼容上一版装在 Tips 的情况）
+		NSString *recorded = [NSString stringWithContentsOfFile:TRPath(@"launcher.target")
+		                                              encoding:NSUTF8StringEncoding error:nil];
+		recorded = [recorded stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+
+		NSMutableArray *bids = [NSMutableArray array];
+		if (recorded.length) [bids addObject:recorded];
+		for (NSString *b in TRLauncherHostBids()) if (![bids containsObject:b]) [bids addObject:b];
+
+		int rc = 0;
+		for (NSString *bid in bids)
 		{
-			TRAppendLog(@"launcher.log", [NSString stringWithFormat:@"❌ 找不到 %@ 的 App 容器", TRLauncherBid]);
-			return 11;
+			NSString *bundle = TRFindBundleByIdentifier(bid);
+			if (!bundle) continue;
+			if (!TRBundleHasOurMarker(bundle)) continue;
+			int r = TRRestoreLauncherAt(bundle);
+			if (r != 0) rc = r;
 		}
-
-		NSString *backup = [exe stringByAppendingString:TRLauncherBackupSuffix];
-		NSString *marker = [bundle stringByAppendingPathComponent:TRLauncherMarkerName];
-
-		if (![fm fileExistsAtPath:backup])
-		{
-			[fm removeItemAtPath:marker error:nil];
-			TRAppendLog(@"launcher.log", @"没有原件备份，只清掉了标记（本来就没装）");
-			return 0;
-		}
-
-		[fm removeItemAtPath:exe error:nil];
-		NSError *err = nil;
-		if (![fm moveItemAtPath:backup toPath:exe error:&err])
-		{
-			TRAppendLog(@"launcher.log", [NSString stringWithFormat:
-				@"❌ 还原失败：%@", err.localizedDescription]);
-			return 13;
-		}
-		[fm removeItemAtPath:marker error:nil];
-		[fm setAttributes:@{NSFilePosixPermissions: @0755,
-		                    NSFileOwnerAccountID: @501,
-		                    NSFileGroupOwnerAccountID: @501}
-		     ofItemAtPath:exe error:nil];
-
-		TRAppendLog(@"launcher.log", @"已还原原件，标记已删除");
+		[[NSFileManager defaultManager] removeItemAtPath:TRPath(@"launcher.target") error:nil];
+		TRAppendLog(@"launcher.log", [NSString stringWithFormat:@"uninstall launcher rc=%d", rc]);
+		return rc;
 	}
-	return 0;
 }
 
 int TRLauncherInstallViaRoot(void)
@@ -981,26 +1070,30 @@ NSString *TRLauncherStatusText(void)
 	NSMutableString *m = [NSMutableString string];
 	NSFileManager *fm = [NSFileManager defaultManager];
 
-	NSString *bundle = nil;
-	NSString *exe = TRLauncherTargetExe(&bundle);
-	if (!exe)
+	for (NSString *bid in TRLauncherHostBids())
 	{
-		[m appendString:@"启动器 目标 Tips=未找到（容器里没有 com.apple.tips）\n"];
-		return m;
+		NSString *bundle = TRFindBundleByIdentifier(bid);
+		if (!bundle)
+		{
+			[m appendFormat:@"宿主 %@ = 找不到\n", bid];
+			continue;
+		}
+		NSString *exe = TRBundleExePath(bundle);
+		NSString *backup = [exe stringByAppendingString:TRLauncherBackupSuffix];
+		BOOL ours = TRBundleHasOurMarker(bundle);
+		BOOL ts = TRBundleIsTrollStoreHost(bundle);
+		unsigned long long exeSize =
+			[[fm attributesOfItemAtPath:exe error:nil][NSFileSize] unsignedLongLongValue];
+		unsigned long long bakSize =
+			[[fm attributesOfItemAtPath:backup error:nil][NSFileSize] unsignedLongLongValue];
+
+		[m appendFormat:@"宿主 %@\n", bid];
+		[m appendFormat:@"  我们的标记=%@%@  原件备份=%@\n",
+			ours ? @"是 ✅" : @"否",
+			ts ? @"  (带 TrollStore 标记)" : @"",
+			bakSize > 0 ? [NSString stringWithFormat:@"是 (%llu B)", bakSize] : @"无"];
+		[m appendFormat:@"  当前主可执行=%llu B%@\n", exeSize,
+			(ours && bakSize > 0 && exeSize != bakSize) ? @"  (已被替换为启动器)" : @""];
 	}
-	NSString *backup = [exe stringByAppendingString:TRLauncherBackupSuffix];
-	NSString *marker = [bundle stringByAppendingPathComponent:TRLauncherMarkerName];
-
-	unsigned long long exeSize =
-		[[fm attributesOfItemAtPath:exe error:nil][NSFileSize] unsignedLongLongValue];
-	unsigned long long bakSize =
-		[[fm attributesOfItemAtPath:backup error:nil][NSFileSize] unsignedLongLongValue];
-
-	[m appendFormat:@"启动器 Tips=%@\n", bundle];
-	[m appendFormat:@"  已安装(标记)=%@  原件备份=%@\n",
-		[fm fileExistsAtPath:marker] ? @"是 ✅" : @"否",
-		[fm fileExistsAtPath:backup] ? [NSString stringWithFormat:@"是 (%llu B)", bakSize] : @"无"];
-	[m appendFormat:@"  当前主可执行=%llu B%@\n", exeSize,
-		(bakSize > 0 && exeSize != bakSize) ? @"  (已被替换为启动器)" : @""];
 	return m;
 }
