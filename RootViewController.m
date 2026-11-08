@@ -320,7 +320,6 @@ static double TRMemoryUsageMB(void)
 {
 	// mon9：私有 IOKit 在这台机器上会直接杀掉进程，不再在 App 内调用。
 	// 电池数据一律由 root 守护提供（守护内部用公开 API + fork 隔离的私有 IOKit，崩了也不影响 App）。
-	NSString *why = @"";
 
 	NSString *raw = [self rawRequest:@"/batteryjson"];
 	if ([raw isEqualToString:@"unknown path"])
