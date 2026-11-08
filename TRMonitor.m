@@ -171,9 +171,15 @@ BOOL TRMonitorSampleIsStuck(NSDictionary *s, NSString **reason, BOOL *softOnly)
 		return NO;
 	}
 
-	// ③ 电量没满
+	// ③ 电量必须读得到：读不到就当作「不确定」，保守不累计（宁漏报不误重启）
 	NSNumber *pct = s[@"percent"];
-	if (pct && [pct integerValue] >= 100)
+	if (pct == nil)
+	{
+		if (reason)
+			*reason = @"电量读数缺失（保守起见不累计）";
+		return NO;
+	}
+	if ([pct integerValue] >= 100)
 	{
 		if (reason)
 			*reason = @"电量已 100%";
@@ -190,9 +196,15 @@ BOOL TRMonitorSampleIsStuck(NSDictionary *s, NSString **reason, BOOL *softOnly)
 		return NO;
 	}
 
-	// ⑤ 温度在合理区间（避免把高温停充当卡死）
+	// ⑤ 温度必须读得到，且在合理区间（避免把高温停充当卡死）
 	NSNumber *t = s[@"tempC"];
-	if (t && ([t doubleValue] < TRMON_TEMP_MIN_C || [t doubleValue] > TRMON_TEMP_MAX_C))
+	if (t == nil)
+	{
+		if (reason)
+			*reason = @"温度读数缺失（保守起见不累计）";
+		return NO;
+	}
+	if ([t doubleValue] < TRMON_TEMP_MIN_C || [t doubleValue] > TRMON_TEMP_MAX_C)
 	{
 		if (reason)
 			*reason = [NSString stringWithFormat:@"温度 %.1f℃ 超出 %d–%d℃", [t doubleValue],
