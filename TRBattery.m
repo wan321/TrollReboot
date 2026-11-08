@@ -510,5 +510,22 @@ NSDictionary *TRPowerSourcesRead(void)
 	if ([picked[@"Time to Full Charge"] isKindOfClass:[NSNumber class]])
 		out[@"timeToFull"] = picked[@"Time to Full Charge"];
 
+	// powerd 的电源描述里有时也带电流/电压/温度（IOPSKeys: Current / Voltage / Temperature）。
+	// 这是公开接口拿到的，不碰私有注册表——有就用，省得去摸 IOKit。
+	if ([picked[@"Current"] isKindOfClass:[NSNumber class]])
+	{
+		out[@"currentMA"] = picked[@"Current"];
+		out[@"currentSource"] = @"public";
+	}
+	if ([picked[@"Voltage"] isKindOfClass:[NSNumber class]])
+		out[@"voltageMV"] = picked[@"Voltage"];
+	if ([picked[@"Temperature"] isKindOfClass:[NSNumber class]])
+	{
+		double tv = [picked[@"Temperature"] doubleValue];
+		// 不同版本单位不一：>100 视为 0.1℃，否则本身就是 ℃
+		out[@"tempC"] = @(tv > 100.0 ? tv / 10.0 : tv);
+		out[@"tempRaw"] = picked[@"Temperature"];
+	}
+
 	return out;
 }

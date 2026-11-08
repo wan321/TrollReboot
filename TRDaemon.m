@@ -334,6 +334,27 @@ static void *TRMonitorThread(void *arg)
 			}
 
 			BOOL haveCurrent = [sample[@"currentMA"] isKindOfClass:[NSNumber class]];
+			// ③ 公开电源描述里若也带电流/电压/温度，就直接用（完全不碰私有注册表）
+			if (!haveCurrent && [pub[@"currentMA"] isKindOfClass:[NSNumber class]])
+			{
+				NSMutableDictionary *merged = sample ? [sample mutableCopy] : [NSMutableDictionary dictionary];
+				merged[@"currentMA"] = pub[@"currentMA"];
+				merged[@"currentSource"] = @"public";
+				if ([pub[@"voltageMV"] isKindOfClass:[NSNumber class]])
+					merged[@"voltageMV"] = pub[@"voltageMV"];
+				if ([pub[@"tempC"] isKindOfClass:[NSNumber class]])
+					merged[@"tempC"] = pub[@"tempC"];
+				if (merged[@"ok"] == nil)
+					merged[@"ok"] = @YES;
+				if (merged[@"external"] == nil)
+					merged[@"external"] = @(pubPlugged);
+				if (merged[@"charging"] == nil)
+					merged[@"charging"] = @(pubCharging);
+				if (merged[@"percent"] == nil && pubPct > 0)
+					merged[@"percent"] = @(pubPct);
+				sample = merged;
+				haveCurrent = YES;
+			}
 			BOOL powered = pubPlugged || [sample[@"external"] boolValue];
 
 			BOOL stuck = NO;

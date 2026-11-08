@@ -20,7 +20,7 @@
  * 所有需要 root 的动作都在守护里做，App 只负责显示。
  */
 
-#define TR_BUILD_TAG @"TrollReboot 3.5-mon5"
+#define TR_BUILD_TAG @"TrollReboot 3.5-mon6"
 
 static NSString *TRDeviceName(void)
 {
