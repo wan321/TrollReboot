@@ -22,12 +22,15 @@
 #import <pthread.h>
 #import <stdlib.h>
 #import <dispatch/dispatch.h>
+#import <sys/socket.h>
+#import <netinet/in.h>
+#import <arpa/inet.h>
 
 #import "TRBattery.h"
 #import "TRMonitor.h"
 #import "TRRootOps.h"
 
-#define BG_TAG @"BatteryGuard 1.3 rules"
+#define BG_TAG @"BatteryGuard 1.4 notchg url"
 #define BGDIR @"/var/mobile/Library/Caches/com.wan.batterychargeguard"
 #define BG_TICK_SEC 2.0
 #define BG_LOG_MAX 512 * 1024
@@ -572,14 +575,15 @@ static NSInteger gGraceSec = 0;
 static NSInteger gTickSeq = 0;
 static NSUInteger gRawPos = 0;
 static BOOL gRebooting = NO;
+static NSDictionary *gLastSample = nil;   // 供 /batteryjson 与 /ping 读取
 
 /// 规则说明：全部数值从常量现取，改常量就跟着变，不再写死一句话
 static NSString *BGRuleText(void)
 {
 	return [NSString stringWithFormat:
-	        @"规则: 插电+在充+未满+温度%d-%d℃+|电流|<%dmA 持续%ld分(容忍%ds)\n"
+	        @"规则: 插电+电量<%d%%+温度%d-%d℃+|电流|<%dmA 持续%ld分(容忍%ds)\n"
 	        @"安全: 冷却%ld分/开机%d次/小时%d次/天%d次/熔断%d次",
-	        TRMON_TEMP_MIN_C, TRMON_TEMP_MAX_C, TRMON_CURRENT_MA,
+	        TRMON_STOPCHG_MAX_PCT, TRMON_TEMP_MIN_C, TRMON_TEMP_MAX_C, TRMON_CURRENT_MA,
 	        (long)TRMonitorStuckMinutes(), TRMON_GRACE_SEC,
 	        (long)(TRMON_COOLDOWN_SEC / 60), TRMON_MAX_PER_BOOT,
 	        TRMON_MAX_PER_HOUR, TRMON_MAX_PER_DAY, TRMON_BREAKER_COUNT];
@@ -610,6 +614,7 @@ static void BGTick(void)
 	}
 
 	NSDictionary *sample = BGMakeSample(app, text);
+	gLastSample = sample;
 
 	NSString *reason = nil;
 	BOOL softOnly = NO;
@@ -844,3 +849,219 @@ __attribute__((constructor)) static void BGInit(void)
 		});
 	}
 }
+
+#pragma mark - 快捷指令入口：本地 HTTP（127.0.0.1:8899）+ URL scheme
+//
+// 两种入口都必须先解锁才能用（B 档），所以它们只是「人工触发」的补充，不是免解锁方案。
+//   HTTP：GET http://127.0.0.1:8899/{ping,batteryjson,guard,reboot}
+//   scheme：batterychargeguard://reboot    batterychargeguard://status
+
+#define BG_HTTP_PORT 8899
+#define BG_URL_SCHEME "batterychargeguard"
+
+static NSString *BGJSONText(id obj)
+{
+	if (!obj || ![NSJSONSerialization isValidJSONObject:obj])
+		return @"{}";
+	NSData *d = [NSJSONSerialization dataWithJSONObject:obj options:0 error:nil];
+	return d ? [[NSString alloc] initWithData:d encoding:NSUTF8StringEncoding] : @"{}";
+}
+
+static NSString *BGHTTPBody(NSString *path, BOOL *serverReboot)
+{
+	if (serverReboot)
+		*serverReboot = NO;
+
+	if ([path hasPrefix:@"/reboot"])
+	{
+		BGLog(@"[http] /reboot 请求，300ms 后重启");
+		if (serverReboot)
+			*serverReboot = YES;
+		return @"{\"ok\":true,\"action\":\"reboot\",\"delay_ms\":300}";
+	}
+
+	NSDictionary *s = gLastSample;
+	if ([path hasPrefix:@"/batteryjson"])
+	{
+		NSMutableDictionary *d = [NSMutableDictionary dictionary];
+		d[@"ok"] = @(s != nil);
+		d[@"tag"] = BG_TAG;
+		d[@"sample"] = s ?: @{};
+		d[@"stuckSec"] = @(gStuckSec);
+		d[@"needSec"] = @(TRMonitorStuckMinutes() * 60);
+		d[@"safety"] = BGSafetyText(TRMonitorStateLoad());
+		return BGJSONText(d);
+	}
+	if ([path hasPrefix:@"/guard"])
+	{
+		NSString *reason = nil;
+		BOOL soft = NO;
+		BOOL stuck = s ? TRMonitorSampleIsStuck(s, &reason, &soft) : NO;
+		return BGJSONText(@{ @"ok": @YES,
+		                     @"tag": BG_TAG,
+		                     @"stuck": @(stuck),
+		                     @"reason": reason ?: @"",
+		                     @"stuckSec": @(gStuckSec),
+		                     @"needSec": @(TRMonitorStuckMinutes() * 60) });
+	}
+	if ([path hasPrefix:@"/ping"])
+	{
+		return BGJSONText(@{ @"ok": @YES,
+		                     @"tag": BG_TAG,
+		                     @"pid": @(getpid()),
+		                     @"minutes": @(TRMonitorStuckMinutes()),
+		                     @"tick": @(gTickSeq),
+		                     @"charging": s ? (s[@"charging"] ?: @NO) : @NO });
+	}
+	return BGJSONText(@{ @"ok": @NO, @"error": @"unknown path",
+	                     @"paths": @[ @"/ping", @"/batteryjson", @"/guard", @"/reboot" ] });
+}
+
+static void BGServeClient(int c)
+{
+	struct timeval tv = { 2, 0 };
+	setsockopt(c, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+
+	char buf[1024] = {0};
+	ssize_t n = read(c, buf, sizeof(buf) - 1);
+	if (n <= 0)
+	{
+		close(c);
+		return;
+	}
+
+	NSString *req = [NSString stringWithUTF8String:buf] ?: @"";
+	NSArray *parts = [req componentsSeparatedByString:@" "];
+	NSString *path = (parts.count >= 2) ? parts[1] : @"/";
+
+	BOOL doReboot = NO;
+	NSString *body = BGHTTPBody(path, &doReboot);
+	NSData *bd = [body dataUsingEncoding:NSUTF8StringEncoding];
+	NSString *head = [NSString stringWithFormat:
+	                  @"HTTP/1.1 200 OK\r\nContent-Type: application/json; charset=utf-8\r\n"
+	                  @"Content-Length: %lu\r\nConnection: close\r\n\r\n",
+	                  (unsigned long)bd.length];
+	NSMutableData *out = [NSMutableData dataWithData:[head dataUsingEncoding:NSUTF8StringEncoding]];
+	[out appendData:bd];
+	write(c, out.bytes, (size_t)out.length);
+	close(c);
+
+	if (doReboot)
+	{
+		dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(300 * NSEC_PER_MSEC)),
+		               dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
+			               BGDoReboot(@"HTTP /reboot");
+		               });
+	}
+}
+
+static void BGStartHTTP(void)
+{
+	int fd = socket(AF_INET, SOCK_STREAM, 0);
+	if (fd < 0)
+	{
+		BGLog(@"[http] socket 失败");
+		return;
+	}
+
+	int one = 1;
+	setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &one, sizeof(one));
+
+	struct sockaddr_in addr;
+	memset(&addr, 0, sizeof(addr));
+	addr.sin_family = AF_INET;
+	addr.sin_port = htons(BG_HTTP_PORT);
+	addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+
+	if (bind(fd, (struct sockaddr *)&addr, sizeof(addr)) < 0 || listen(fd, 8) < 0)
+	{
+		BGLog([NSString stringWithFormat:@"[http] 绑定 127.0.0.1:%d 失败 errno=%d", BG_HTTP_PORT, errno]);
+		close(fd);
+		return;
+	}
+
+	dispatch_queue_t q = dispatch_queue_create("com.wan.batterychargeguard.http", NULL);
+	dispatch_source_t src = dispatch_source_create(DISPATCH_SOURCE_TYPE_READ, (uintptr_t)fd, 0, q);
+	dispatch_source_set_event_handler(src, ^{
+		int c = accept(fd, NULL, NULL);
+		if (c >= 0)
+			BGServeClient(c);
+	});
+	dispatch_resume(src);
+
+	BGLog([NSString stringWithFormat:@"[http] 监听 127.0.0.1:%d（/ping /batteryjson /guard /reboot）", BG_HTTP_PORT]);
+}
+
+static BOOL BGHandleURL(NSURL *url)
+{
+	NSString *all = url.absoluteString ?: @"";
+	NSString *key = url.host.length ? url.host : (url.path.length ? url.path : @"");
+	BGLog([NSString stringWithFormat:@"[url] %@", all]);
+
+	if ([key containsString:@"reboot"])
+	{
+		BGLog(@"[url] 请求重启");
+		BGDoReboot(@"URL scheme");
+		return YES;
+	}
+	if ([key containsString:@"status"])
+	{
+		BGLog([NSString stringWithFormat:@"[url] 状态 %@", BGHTTPBody(@"/guard", NULL)]);
+		return YES;
+	}
+	return NO;
+}
+
+static void BGInstallURLHook(void)
+{
+	id delegate = [UIApplication sharedApplication].delegate;
+	if (!delegate)
+		return;
+
+	Class cls = object_getClass(delegate);
+	if (cls == [NSObject class])
+		return;
+
+	SEL sel = @selector(application:openURL:options:);
+	Method m = class_getInstanceMethod(cls, sel);
+	IMP orig = m ? method_getImplementation(m) : NULL;
+
+	IMP repl = imp_implementationWithBlock(^BOOL(id self_, UIApplication *app, NSURL *url, NSDictionary *opts) {
+		if (BGHandleURL(url))
+			return YES;
+		if (orig)
+			return ((BOOL (*)(id, SEL, id, id, id))orig)(self_, sel, app, url, opts);
+		return NO;
+	});
+
+	if (m)
+		method_setImplementation(m, repl);
+	else
+		class_addMethod(cls, sel, repl, "c@:@@@");
+
+	BGLog([NSString stringWithFormat:@"[url] 已挂 处理类 %@（原实现 %@）", NSStringFromClass(cls), m ? @"有" : @"无"]);
+}
+
+__attribute__((constructor)) static void BGInitEntrypoints(void)
+{
+	@autoreleasepool
+	{
+		BGStartHTTP();
+
+		NSNotificationCenter *nc = [NSNotificationCenter defaultCenter];
+		[nc addObserverForName:UIApplicationDidFinishLaunchingNotification object:nil queue:[NSOperationQueue mainQueue] usingBlock:^(NSNotification *n) {
+			BGInstallURLHook();
+		}];
+		[nc addObserverForName:UIApplicationDidBecomeActiveNotification object:nil queue:[NSOperationQueue mainQueue] usingBlock:^(NSNotification *n) {
+			BGInstallURLHook();
+		}];
+
+		// 冷启动由 scheme 拉起时，地址会通过 launchOptions 传进来
+		id delegate = [UIApplication sharedApplication].delegate;
+		if (delegate && [delegate respondsToSelector:@selector(window)])
+		{
+			BGInstallURLHook();
+		}
+	}
+}
+

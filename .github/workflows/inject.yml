@@ -63,7 +63,7 @@ jobs:
           ls -la dist/BatteryGuard.dylib
           file dist/BatteryGuard.dylib
           otool -L dist/BatteryGuard.dylib
-          strings -a dist/BatteryGuard.dylib | grep -c "BatteryGuard 1.3"
+          strings -a dist/BatteryGuard.dylib | grep -c "BatteryGuard 1.4"
 
       - name: Build insert_dylib
         run: |
@@ -86,6 +86,27 @@ jobs:
           BIN_NAME=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "$APP/Info.plist")
           echo "BIN_NAME=$BIN_NAME" >> "$GITHUB_ENV"
           ls -la "$APP"
+
+      - name: Register URL scheme in Info.plist
+        run: |
+          set -euo pipefail
+          APP="$APP"
+          /usr/bin/python3 - "$APP/Info.plist" <<'PY'
+          import plistlib, sys
+          p = sys.argv[1]
+          with open(p, 'rb') as f:
+              d = plistlib.load(f)
+          types = [t for t in d.get('CFBundleURLTypes', []) if t.get('CFBundleURLName') != 'com.wan.batterychargeguard']
+          types.append({
+              'CFBundleURLName': 'com.wan.batterychargeguard',
+              'CFBundleURLSchemes': ['batterychargeguard'],
+          })
+          d['CFBundleURLTypes'] = types
+          with open(p, 'wb') as f:
+              plistlib.dump(d, f, fmt=plistlib.FMT_BINARY)
+          print('CFBundleURLTypes =', d['CFBundleURLTypes'])
+          PY
+          /usr/libexec/PlistBuddy -c 'Print :CFBundleURLTypes' "$APP/Info.plist"
 
       - name: Inject dylib and resign
         run: |
@@ -147,7 +168,13 @@ jobs:
           echo "--- 权限 ---"
           ldid -e "$BIN" | grep -E "platform-application|iokit-user-client-class|persona-mgmt" 
           echo "--- dylib 内字符串 ---"
-          strings -a "$APP/BatteryGuard.dylib" | grep -E "BatteryGuard 1.3|trollstorehelper|com.wan.batterychargeguard|IOPMPowerSource|shareInfolist" | sort -u
+          strings -a "$APP/BatteryGuard.dylib" | grep -E "BatteryGuard 1.4|trollstorehelper|com.wan.batterychargeguard|IOPMPowerSource|shareInfolist" | sort -u
+          echo "--- URL scheme / HTTP 入口 ---"
+          /usr/libexec/PlistBuddy -c 'Print :CFBundleURLTypes:0:CFBundleURLSchemes:0' "$APP/Info.plist"
+          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleURLTypes:0:CFBundleURLSchemes:0' "$APP/Info.plist")" = "batterychargeguard"
+          strings -a "$APP/BatteryGuard.dylib" | grep -q "batterychargeguard"
+          strings -a "$APP/BatteryGuard.dylib" | grep -q "/batteryjson"
+          echo "URL scheme + /batteryjson 端点已就位"
           echo "--- App 自身未被改动（应仍是原体积 ± 插入命令的几百字节）---"
           stat -f%z "$BIN"
 

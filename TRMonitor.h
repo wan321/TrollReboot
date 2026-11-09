@@ -19,6 +19,7 @@
 #define TRMON_CURRENT_MA 50     // |电流| < 50mA 才算没在充
 #define TRMON_TEMP_MIN_C 0      // 温度下限（℃）
 #define TRMON_TEMP_MAX_C 45     // 温度上限（℃）
+#define TRMON_STOPCHG_MAX_PCT 95 // 系统已停充时，电量到这个值以上就放过（多半是真充满/优化充电）
 #define TRMON_SAMPLE_SEC 10     // 采样间隔（秒）
 
 /// 写死的安全约束

@@ -190,12 +190,17 @@ BOOL TRMonitorSampleIsStuck(NSDictionary *s, NSString **reason, BOOL *softOnly)
 		return NO;
 	}
 
-	// ② 系统必须认为自己正在充电
+	// ② 系统报「未在充电」不再一票否决：充电器插着却没在充，可能正是卡死
+	//    （真充满 / 优化电池充电 / 高温停充 靠「电量≥95%」「温度越界」「满容量」三条排除）
 	if (![s[@"charging"] boolValue])
 	{
-		if (reason)
-			*reason = @"系统未在充电（已充满/优化充电/高温/涓流）";
-		return NO;
+		NSNumber *p = s[@"percent"];
+		if (p && [p integerValue] >= TRMON_STOPCHG_MAX_PCT)
+		{
+			if (reason)
+				*reason = @"系统已停充且电量≥95%（多半是真充满/优化充电）";
+			return NO;
+		}
 	}
 
 	// ③ 电量必须读得到：读不到就当作「不确定」，保守不累计（宁漏报不误重启）
