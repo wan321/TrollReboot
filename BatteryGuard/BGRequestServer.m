@@ -33,6 +33,9 @@
 #import "TRMonitor.h"
 #import "TRRootOps.h"
 
+// 有的 iOS SDK 头里没有 reboot() 原型，显式声明，避免隐式声明警告被当成错误
+extern int reboot(int);
+
 #define BGREQ_PORT 8899
 #define BGREQ_TAG @"BatteryGuard 1.5 reqd"
 #define BGREQ_DIR @"/var/mobile/Library/Caches/com.wan.batterychargeguard"
