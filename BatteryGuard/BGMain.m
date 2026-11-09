@@ -993,7 +993,7 @@ static void BGEnsureDaemon(void)
 		return;
 	}
 
-	BGLog(@"[daemon] 拉起 %@", path);
+	BGLog([NSString stringWithFormat:@"[daemon] 拉起 %@", path]);
 	TRSpawnRootDetached(path, @[ @"--daemon" ], nil, nil);
 
 	for (int i = 0; i < 12; i++)
