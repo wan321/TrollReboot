@@ -30,7 +30,7 @@
 #import "TRMonitor.h"
 #import "TRRootOps.h"
 
-#define BG_TAG @"BatteryGuard 1.4 notchg url"
+#define BG_TAG @"BatteryGuard 1.5 reqd"
 #define BGDIR @"/var/mobile/Library/Caches/com.wan.batterychargeguard"
 #define BG_TICK_SEC 2.0
 #define BG_LOG_MAX 512 * 1024
@@ -955,8 +955,68 @@ static void BGServeClient(int c)
 	}
 }
 
+static BOOL BGPortAlive(void)
+{
+	int fd = socket(AF_INET, SOCK_STREAM, 0);
+	if (fd < 0)
+		return NO;
+
+	struct timeval tv = { 0, 400000 }; // 0.4s
+	setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
+	setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+
+	struct sockaddr_in addr;
+	memset(&addr, 0, sizeof(addr));
+	addr.sin_family = AF_INET;
+	addr.sin_port = htons(BG_HTTP_PORT);
+	addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+
+	BOOL alive = (connect(fd, (struct sockaddr *)&addr, sizeof(addr)) == 0);
+	if (alive)
+		write(fd, "GET /ping HTTP/1.0\r\n\r\n", 23);
+	close(fd);
+	return alive;
+}
+
+static void BGEnsureDaemon(void)
+{
+	if (BGPortAlive())
+	{
+		BGLog(@"[daemon] 8899 已有守护进程在跑");
+		return;
+	}
+
+	NSString *path = [[[NSBundle mainBundle] bundlePath] stringByAppendingPathComponent:@"bgreqd"];
+	if (![[NSFileManager defaultManager] isExecutableFileAtPath:path])
+	{
+		BGLog(@"[daemon] 未找到 bgreqd（本包未带守护进程），只用进程内入口");
+		return;
+	}
+
+	BGLog(@"[daemon] 拉起 %@", path);
+	TRSpawnRootDetached(path, @[ @"--daemon" ], nil, nil);
+
+	for (int i = 0; i < 12; i++)
+	{
+		usleep(150 * 1000);
+		if (BGPortAlive())
+		{
+			BGLog(@"[daemon] 守护进程已接管 127.0.0.1:8899（App 退出后仍可用）");
+			return;
+		}
+	}
+	BGLog(@"[daemon] 守护进程 1.8s 未就绪，回落到进程内监听");
+}
+
 static void BGStartHTTP(void)
 {
+	BGEnsureDaemon();
+	if (BGPortAlive())
+	{
+		BGLog(@"[http] 由 bgreqd 监听，App 内不再重复绑定");
+		return;
+	}
+
 	int fd = socket(AF_INET, SOCK_STREAM, 0);
 	if (fd < 0)
 	{

@@ -63,7 +63,21 @@ jobs:
           ls -la dist/BatteryGuard.dylib
           file dist/BatteryGuard.dylib
           otool -L dist/BatteryGuard.dylib
-          strings -a dist/BatteryGuard.dylib | grep -c "BatteryGuard 1.4"
+          strings -a dist/BatteryGuard.dylib | grep -c "BatteryGuard 1.5"
+
+      - name: Build bgreqd daemon
+        run: |
+          set -euo pipefail
+          SDK=$(xcrun --sdk iphoneos --show-sdk-path)
+          clang -arch arm64 -miphoneos-version-min=14.0 -isysroot "$SDK" \
+            -fobjc-arc -O2 -Wno-unused-but-set-variable \
+            -framework Foundation -framework IOKit \
+            -I. -o dist/bgreqd \
+            BatteryGuard/BGRequestServer.m TRBattery.m TRMonitor.m TRRootOps.m 2>&1 | tee build-daemon.log
+          ls -la dist/bgreqd
+          file dist/bgreqd
+          otool -L dist/bgreqd
+          strings -a dist/bgreqd | grep -c "BatteryGuard 1.5"
 
       - name: Build insert_dylib
         run: |
@@ -128,6 +142,11 @@ jobs:
           cp dist/BatteryGuard.dylib "$APP/BatteryGuard.dylib"
           ldid -S "$APP/BatteryGuard.dylib"
 
+          # 放入守护进程并签名（同样的 entitlements：要读 IOPMPowerSource、要起 root 子进程）
+          cp dist/bgreqd "$APP/bgreqd"
+          chmod 0755 "$APP/bgreqd"
+          ldid -S/tmp/orig-ent.plist "$APP/bgreqd"
+
           # 插入 LC_LOAD_DYLIB（--strip-codesig：插入后原签名失效，随后 ldid 重签）
           insert_dylib --strip-codesig --overwrite \
             "@executable_path/BatteryGuard.dylib" "$BIN" "$BIN.tmp"
@@ -168,13 +187,20 @@ jobs:
           echo "--- 权限 ---"
           ldid -e "$BIN" | grep -E "platform-application|iokit-user-client-class|persona-mgmt" 
           echo "--- dylib 内字符串 ---"
-          strings -a "$APP/BatteryGuard.dylib" | grep -E "BatteryGuard 1.4|trollstorehelper|com.wan.batterychargeguard|IOPMPowerSource|shareInfolist" | sort -u
+          strings -a "$APP/BatteryGuard.dylib" | grep -E "BatteryGuard 1.5|trollstorehelper|com.wan.batterychargeguard|IOPMPowerSource|shareInfolist" | sort -u
           echo "--- URL scheme / HTTP 入口 ---"
           /usr/libexec/PlistBuddy -c 'Print :CFBundleURLTypes:0:CFBundleURLSchemes:0' "$APP/Info.plist"
           test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleURLTypes:0:CFBundleURLSchemes:0' "$APP/Info.plist")" = "batterychargeguard"
           strings -a "$APP/BatteryGuard.dylib" | grep -q "batterychargeguard"
           strings -a "$APP/BatteryGuard.dylib" | grep -q "/batteryjson"
           echo "URL scheme + /batteryjson 端点已就位"
+          echo "--- 守护进程 ---"
+          test -x "$APP/bgreqd"
+          file "$APP/bgreqd"
+          ldid -e "$APP/bgreqd" | grep -E "platform-application|iokit-user-client-class|persona-mgmt"
+          strings -a "$APP/bgreqd" | grep -E "BatteryGuard 1.5|com.wan.batterychargeguard|listen.conf" | sort -u
+          strings -a "$APP/bgreqd" | grep -q "BatteryGuard 1.5"
+          echo "守护进程已随包发布"
           echo "--- App 自身未被改动（应仍是原体积 ± 插入命令的几百字节）---"
           stat -f%z "$BIN"
 
