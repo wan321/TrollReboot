@@ -308,3 +308,30 @@ NSString *TRMonitorConditionsText(void)
 	         @"条件（写死）：插电＋在充＋|电流|<%dmA＋电量<100%%＋未满容量＋温度 %d–%d℃",
 	         TRMON_CURRENT_MA, TRMON_TEMP_MIN_C, TRMON_TEMP_MAX_C];
 }
+
+#pragma mark - 重置
+
+NSString *TRMonitorResetState(void)
+{
+	NSMutableDictionary *st = [TRMonitorStateLoad() mutableCopy];
+	if (!st)
+		st = [NSMutableDictionary dictionary];
+	st[@"breaker"] = @0;
+	st[@"lastRebootTS"] = @0;
+	st[@"rebootCountBoot"] = @0;
+	st[@"rebootTimes"] = @[];
+	st[@"bootTS"] = @(TRMonitorCurrentBootTime());
+	if (!TRMonitorStateWrite(st))
+		return @"重置失败（状态文件写不进去）";
+	return @"已重置（熔断/冷却/计数清零）";
+}
+
+BOOL TRMonitorClearBreaker(void)
+{
+	NSDictionary *st = TRMonitorStateLoad() ?: @{};
+	if ([st[@"breaker"] integerValue] <= 0)
+		return NO;
+	NSMutableDictionary *m = [st mutableCopy];
+	m[@"breaker"] = @0;
+	return TRMonitorStateWrite(m);
+}

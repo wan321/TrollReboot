@@ -63,7 +63,7 @@ jobs:
           ls -la dist/BatteryGuard.dylib
           file dist/BatteryGuard.dylib
           otool -L dist/BatteryGuard.dylib
-          strings -a dist/BatteryGuard.dylib | grep -c "BatteryGuard 1.5"
+          strings -a dist/BatteryGuard.dylib | grep -c "BatteryGuard 1.6"
 
       - name: Build bgreqd daemon
         run: |
@@ -77,7 +77,7 @@ jobs:
           ls -la dist/bgreqd
           file dist/bgreqd
           otool -L dist/bgreqd
-          strings -a dist/bgreqd | grep -c "BatteryGuard 1.5"
+          strings -a dist/bgreqd | grep -c "BatteryGuard 1.6"
 
       - name: Build insert_dylib
         run: |
@@ -187,12 +187,15 @@ jobs:
           echo "--- 权限 ---"
           ldid -e "$BIN" | grep -E "platform-application|iokit-user-client-class|persona-mgmt" 
           echo "--- dylib 内字符串 ---"
-          strings -a "$APP/BatteryGuard.dylib" | grep -E "BatteryGuard 1.5|trollstorehelper|com.wan.batterychargeguard|IOPMPowerSource|shareInfolist" | sort -u
+          strings -a "$APP/BatteryGuard.dylib" | grep -E "BatteryGuard 1.6|trollstorehelper|com.wan.batterychargeguard|IOPMPowerSource|shareInfolist" | sort -u
           echo "--- URL scheme / HTTP 入口 ---"
           /usr/libexec/PlistBuddy -c 'Print :CFBundleURLTypes:0:CFBundleURLSchemes:0' "$APP/Info.plist"
           test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleURLTypes:0:CFBundleURLSchemes:0' "$APP/Info.plist")" = "batterychargeguard"
           strings -a "$APP/BatteryGuard.dylib" | grep -q "batterychargeguard"
           strings -a "$APP/BatteryGuard.dylib" | grep -q "/batteryjson"
+          strings -a "$APP/BatteryGuard.dylib" | grep -q "/monitor/reset"
+          strings -a "$APP/bgreqd" | grep -q "/monitor/reset"
+          echo "熔断重置端点已就位（dylib + bgreqd）"
           echo "URL scheme + /batteryjson 端点已就位"
           echo "--- 守护进程 ---"
           test -x "$APP/bgreqd"

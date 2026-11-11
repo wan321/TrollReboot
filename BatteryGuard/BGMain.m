@@ -30,7 +30,7 @@
 #import "TRMonitor.h"
 #import "TRRootOps.h"
 
-#define BG_TAG @"BatteryGuard 1.5 reqd"
+#define BG_TAG @"BatteryGuard 1.6 reqd"
 #define BGDIR @"/var/mobile/Library/Caches/com.wan.batterychargeguard"
 #define BG_TICK_SEC 2.0
 #define BG_LOG_MAX 512 * 1024
@@ -643,6 +643,13 @@ static void BGTick(void)
 		gGraceSec = 0;
 	}
 
+	// 恢复正常充电（插电且不再卡死）→ 熔断计数归零（「连续」才熔断）
+	if (!stuck && !softOnly && [sample[@"external"] boolValue])
+	{
+		if (TRMonitorClearBreaker())
+			BGLog(@"[monitor] 恢复正常充电，熔断计数已归零");
+	}
+
 	NSInteger minutes = TRMonitorStuckMinutes();
 	NSInteger needSec = minutes * 60;
 	accum = [NSString stringWithFormat:@"累计%lds/需%lds(分钟=%ld)", (long)gStuckSec, (long)needSec, (long)minutes];
@@ -757,7 +764,7 @@ static void BGInstallPanel(void)
 	[panel addSubview:unit];
 
 	UIButton *save = [UIButton buttonWithType:UIButtonTypeSystem];
-	save.frame = CGRectMake(90, 8, 56, 28);
+	save.frame = CGRectMake(88, 8, 50, 28);
 	save.backgroundColor = [UIColor colorWithWhite:1 alpha:0.18];
 	[save setTitle:@"保存" forState:UIControlStateNormal];
 	[save setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
@@ -777,8 +784,28 @@ static void BGInstallPanel(void)
 	} ] forControlEvents:UIControlEventTouchUpInside];
 	[panel addSubview:save];
 
+	UIButton *resetBtn = [UIButton buttonWithType:UIButtonTypeSystem];
+	resetBtn.frame = CGRectMake(142, 8, 50, 28);
+	resetBtn.backgroundColor = [UIColor colorWithRed:0.95 green:0.6 blue:0.12 alpha:1];
+	[resetBtn setTitle:@"重置" forState:UIControlStateNormal];
+	[resetBtn setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
+	resetBtn.titleLabel.font = [UIFont boldSystemFontOfSize:11];
+	resetBtn.layer.cornerRadius = 6;
+	__weak UIButton *weakReset = resetBtn;
+	[resetBtn addAction:[UIAction actionWithHandler:^(__kindof UIAction *a) {
+		NSString *r = TRMonitorResetState();
+		gStuckSec = 0;
+		gGraceSec = 0;
+		BGLog([NSString stringWithFormat:@"[ui] 用户点击「重置」→ %@", r]);
+		[weakReset setTitle:([r hasPrefix:@"已重置"] ? @"已清" : @"失败") forState:UIControlStateNormal];
+		dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+			[weakReset setTitle:@"重置" forState:UIControlStateNormal];
+		});
+	} ] forControlEvents:UIControlEventTouchUpInside];
+	[panel addSubview:resetBtn];
+
 	UIButton *rebootBtn = [UIButton buttonWithType:UIButtonTypeSystem];
-	rebootBtn.frame = CGRectMake(150, 8, frame.size.width - 160, 28);
+	rebootBtn.frame = CGRectMake(196, 8, frame.size.width - 206, 28);
 	rebootBtn.backgroundColor = [UIColor colorWithRed:0.9 green:0.2 blue:0.15 alpha:1];
 	[rebootBtn setTitle:@"立即重启" forState:UIControlStateNormal];
 	[rebootBtn setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
@@ -853,7 +880,7 @@ __attribute__((constructor)) static void BGInit(void)
 #pragma mark - 快捷指令入口：本地 HTTP（127.0.0.1:8899）+ URL scheme
 //
 // 两种入口都必须先解锁才能用（B 档），所以它们只是「人工触发」的补充，不是免解锁方案。
-//   HTTP：GET http://127.0.0.1:8899/{ping,batteryjson,guard,reboot}
+//   HTTP：GET http://127.0.0.1:8899/{ping,batteryjson,guard,monitor,monitor/reset,reboot}
 //   scheme：batterychargeguard://reboot    batterychargeguard://status
 
 #define BG_HTTP_PORT 8899
@@ -878,6 +905,23 @@ static NSString *BGHTTPBody(NSString *path, BOOL *serverReboot)
 		if (serverReboot)
 			*serverReboot = YES;
 		return @"{\"ok\":true,\"action\":\"reboot\",\"delay_ms\":300}";
+	}
+
+	if ([path hasPrefix:@"/monitor/reset"])
+	{
+		NSString *r = TRMonitorResetState();
+		gStuckSec = 0;
+		gGraceSec = 0;
+		BGLog([NSString stringWithFormat:@"[http] %@", r]);
+		return BGJSONText(@{ @"ok": @([r hasPrefix:@"已重置"]), @"tag": BG_TAG, @"result": r });
+	}
+	if ([path hasPrefix:@"/monitor"])
+	{
+		NSDictionary *stm = TRMonitorStateLoad() ?: @{};
+		return BGJSONText(@{ @"ok": @YES, @"tag": BG_TAG,
+		                     @"breaker": stm[@"breaker"] ?: @0,
+		                     @"breakerMax": @(TRMON_BREAKER_COUNT),
+		                     @"minutes": @(TRMonitorStuckMinutes()) });
 	}
 
 	NSDictionary *s = gLastSample;
@@ -914,7 +958,8 @@ static NSString *BGHTTPBody(NSString *path, BOOL *serverReboot)
 		                     @"charging": s ? (s[@"charging"] ?: @NO) : @NO });
 	}
 	return BGJSONText(@{ @"ok": @NO, @"error": @"unknown path",
-	                     @"paths": @[ @"/ping", @"/batteryjson", @"/guard", @"/reboot" ] });
+	                     @"paths": @[ @"/ping", @"/batteryjson", @"/guard", @"/monitor", @"/monitor/reset",
+			                     @"/reboot" ] });
 }
 
 static void BGServeClient(int c)

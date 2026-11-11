@@ -58,6 +58,13 @@ NSString *TRMonitorSafetyBlock(NSDictionary *state);
 /// 联合条件的一行文本（面板/日志用）
 NSString *TRMonitorConditionsText(void);
 
+/// 人工重置：熔断 / 冷却 / 本次开机计数 / rebootTimes 全部清零（不动分钟数）
+/// 返回可读结果，成功以「已重置」开头
+NSString *TRMonitorResetState(void);
+
+/// 只清熔断计数（「恢复正常充电」时自动调用，保留冷却与次数限制）；有改动返回 YES
+BOOL TRMonitorClearBreaker(void);
+
 /// 直接读配置文件（绕过 gCachedMinutes，守护端写后校验用）
 NSInteger TRMonitorStuckMinutesFromFile(void);
 

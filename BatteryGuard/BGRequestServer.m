@@ -37,7 +37,7 @@
 extern int reboot(int);
 
 #define BGREQ_PORT 8899
-#define BGREQ_TAG @"BatteryGuard 1.5 reqd"
+#define BGREQ_TAG @"BatteryGuard 1.6 reqd"
 #define BGREQ_DIR @"/var/mobile/Library/Caches/com.wan.batterychargeguard"
 #define BGREQ_LOG BGREQ_DIR @"/guard.log"
 #define BGREQ_LISTEN_CFG BGREQ_DIR @"/listen.conf"
@@ -153,6 +153,13 @@ static void BGReqTick(void)
 			gStuckSec = 0;
 		}
 
+		// 恢复正常充电（插电且不再卡死）→ 熔断计数归零（「连续」才熔断）
+		if (!stuck && !soft && [sample[@"external"] boolValue])
+		{
+			if (TRMonitorClearBreaker())
+				BGReqLog(@"[monitor] 恢复正常充电，熔断计数已归零");
+		}
+
 		NSInteger need = TRMonitorStuckMinutes() * 60;
 		NSMutableDictionary *d = [NSMutableDictionary dictionary];
 		d[@"tick"] = @(gTick);
@@ -195,6 +202,7 @@ static void BGReqTick(void)
 				NSMutableDictionary *st = [TRMonitorStateLoad() mutableCopy] ?: [NSMutableDictionary dictionary];
 				st[@"lastRebootTS"] = @([[NSDate date] timeIntervalSince1970]);
 				st[@"rebootCountBoot"] = @([st[@"rebootCountBoot"] integerValue] + 1);
+				st[@"breaker"] = @([st[@"breaker"] integerValue] + 1);
 				NSMutableArray *times = [st[@"rebootTimes"] mutableCopy] ?: [NSMutableArray array];
 				[times addObject:@([[NSDate date] timeIntervalSince1970])];
 				if (times.count > 32)
@@ -236,6 +244,26 @@ static NSString *BGReqPathBody(NSString *path, BOOL *doReboot)
 		                    @"action": @"reboot", @"delay_ms": @300 });
 	}
 
+	if ([pure hasPrefix:@"/monitor/reset"])
+	{
+		NSString *r = TRMonitorResetState();
+		gStuckSec = 0;
+		gGraceSec = 0;
+		BGReqLog(@"[http] %@", r);
+		return BGReqJSON(@{ @"ok": @([r hasPrefix:@"已重置"]), @"role": @"daemon", @"tag": BGREQ_TAG,
+		                    @"result": r });
+	}
+
+	if ([pure hasPrefix:@"/monitor"])
+	{
+		NSDictionary *stm = TRMonitorStateLoad() ?: @{};
+		return BGReqJSON(@{ @"ok": @YES, @"role": @"daemon", @"tag": BGREQ_TAG,
+		                    @"breaker": stm[@"breaker"] ?: @0,
+		                    @"breakerMax": @(TRMON_BREAKER_COUNT),
+		                    @"minutes": @(TRMonitorStuckMinutes()),
+		                    @"safety": BGReqSafetyText() });
+	}
+
 	if ([pure hasPrefix:@"/listen"])
 	{
 		BOOL on = ![query containsString:@"value=0"];
@@ -269,7 +297,8 @@ static NSString *BGReqPathBody(NSString *path, BOOL *doReboot)
 	                    @"needSec": @(TRMonitorStuckMinutes() * 60),
 	                    @"listen": @(BGReqListenEnabled()),
 	                    @"charging": s ? (s[@"charging"] ?: @NO) : @NO,
-	                    @"paths": @[ @"/ping", @"/batteryjson", @"/guard", @"/listen?value=1", @"/trigger" ] });
+	                    @"paths": @[ @"/ping", @"/batteryjson", @"/guard", @"/monitor", @"/monitor/reset",
+			                    @"/listen?value=1", @"/trigger" ] });
 }
 
 static void BGReqServe(int c)
