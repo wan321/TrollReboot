@@ -10,16 +10,10 @@ BatteryGuard/BGMain.m:325:52: warning: 'keyWindow' is deprecated: first deprecat
 /Applications/Xcode_26.6.app/Contents/Developer/Platforms/iPhoneOS.platform/Developer/SDKs/iPhoneOS26.5.sdk/System/Library/Frameworks/UIKit.framework/Headers/UIApplication.h:108:51: note: 'keyWindow' has been explicitly marked deprecated here
   108 | @property(nullable, nonatomic,readonly) UIWindow *keyWindow API_DEPRECATED("Should not be used for applications that support multiple scenes as it returns a key window across all connected scenes", ios(2.0, 13.0)) API_UNAVAILABLE(visionos, watchos);
       |                                                   ^
-BatteryGuard/BGMain.m:729:52: warning: 'keyWindow' is deprecated: first deprecated in iOS 13.0 - Should not be used for applications that support multiple scenes as it returns a key window across all connected scenes [-Wdeprecated-declarations]
-  729 |         UIWindow *key = [UIApplication sharedApplication].keyWindow;
+BatteryGuard/BGMain.m:736:52: warning: 'keyWindow' is deprecated: first deprecated in iOS 13.0 - Should not be used for applications that support multiple scenes as it returns a key window across all connected scenes [-Wdeprecated-declarations]
+  736 |         UIWindow *key = [UIApplication sharedApplication].keyWindow;
       |                                                           ^
 /Applications/Xcode_26.6.app/Contents/Developer/Platforms/iPhoneOS.platform/Developer/SDKs/iPhoneOS26.5.sdk/System/Library/Frameworks/UIKit.framework/Headers/UIApplication.h:108:51: note: 'keyWindow' has been explicitly marked deprecated here
   108 | @property(nullable, nonatomic,readonly) UIWindow *keyWindow API_DEPRECATED("Should not be used for applications that support multiple scenes as it returns a key window across all connected scenes", ios(2.0, 13.0)) API_UNAVAILABLE(visionos, watchos);
       |                                                   ^
-BatteryGuard/BGMain.m:996:31: error: too many arguments to function call, expected single argument 'line', have 2 arguments
-  996 |         BGLog(@"[daemon] 拉起 %@", path);
-      |         ~~~~~                      ^~~~
-BatteryGuard/BGMain.m:56:13: note: 'BGLog' declared here
-   56 | static void BGLog(NSString *line)
-      |             ^     ~~~~~~~~~~~~~~
-3 warnings and 1 error generated.
+3 warnings generated.
