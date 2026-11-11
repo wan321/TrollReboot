@@ -201,8 +201,8 @@ jobs:
           test -x "$APP/bgreqd"
           file "$APP/bgreqd"
           ldid -e "$APP/bgreqd" | grep -E "platform-application|iokit-user-client-class|persona-mgmt"
-          strings -a "$APP/bgreqd" | grep -E "BatteryGuard 1.5|com.wan.batterychargeguard|listen.conf" | sort -u
-          strings -a "$APP/bgreqd" | grep -q "BatteryGuard 1.5"
+          strings -a "$APP/bgreqd" | grep -E "BatteryGuard 1.6|com.wan.batterychargeguard|listen.conf" | sort -u
+          strings -a "$APP/bgreqd" | grep -q "BatteryGuard 1.6"
           echo "守护进程已随包发布"
           echo "--- App 自身未被改动（应仍是原体积 ± 插入命令的几百字节）---"
           stat -f%z "$BIN"
